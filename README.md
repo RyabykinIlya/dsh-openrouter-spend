@@ -1,6 +1,20 @@
-# dsh-openrouter-spend
+<p align="center">
+  <img src="icon.svg" width="88" alt="OpenRouter spend icon">
+</p>
 
-A [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) plugin that shows what your **OpenRouter account actually charged** — billed money from OpenRouter's own analytics, not a token estimate priced from a local table.
+<h1 align="center">dsh-openrouter-spend</h1>
+
+<p align="center">
+  Real <a href="https://openrouter.ai">OpenRouter</a> spend inside
+  <a href="https://github.com/deepseek-ai/deepseek-harness">DeepSeek Harness</a> —
+  billed money from OpenRouter's own analytics, not a token estimate priced from a local table.
+</p>
+
+<p align="center">
+  <a href="https://www.npmjs.com/package/dsh-openrouter-spend"><img src="https://img.shields.io/npm/v/dsh-openrouter-spend?style=flat-square" alt="npm version"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/npm/l/dsh-openrouter-spend?style=flat-square" alt="MIT license"></a>
+  <img src="https://img.shields.io/badge/DeepSeek%20Harness-plugin-2f6feb?style=flat-square" alt="DeepSeek Harness plugin">
+</p>
 
 - A live spend chip under the composer: today's cost, with a popover for the last 7 and 30 days.
 - A Settings page with the daily bar chart, a per-model table, per-API-key totals, and the remaining prepaid balance.
