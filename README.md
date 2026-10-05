@@ -18,6 +18,16 @@
 
 ## What you get
 
+<p align="center">
+  <img src="https://raw.githubusercontent.com/RyabykinIlya/dsh-openrouter-spend/v0.1.2/docs/chip.png" width="640" alt="Spend chip under the composer"><br>
+  <sub>The chip under the composer: billed spend for the selected range, next to the session's token and context stats.</sub>
+</p>
+
+<p align="center">
+  <img src="https://raw.githubusercontent.com/RyabykinIlya/dsh-openrouter-spend/v0.1.2/docs/popover.png" width="340" alt="Spend popover"><br>
+  <sub>The popover: range and API-key filters, today's spend per model, daily bars, prepaid balance and lifetime spend.</sub>
+</p>
+
 - **Chip under the composer** — spend for the selected range and API key: today, 7 days, or 30 days.
 - **Chip popover** — range and API-key filters, today's spend per model, a daily bar chart across the window, prepaid balance and lifetime spend.
 - **Settings → OpenRouter spend** — store or clear the management key, set the refresh interval, filter by API key.
@@ -40,7 +50,7 @@ dsh plugin --profile web add dsh-openrouter-spend
 From GitHub (plain JavaScript, no build step and no build-script permission):
 
 ```sh
-dsh plugin --profile web add github:RyabykinIlya/dsh-openrouter-spend#v0.1.1
+dsh plugin --profile web add github:RyabykinIlya/dsh-openrouter-spend#v0.1.2
 ```
 
 Then open Settings → OpenRouter spend and paste the management key.
