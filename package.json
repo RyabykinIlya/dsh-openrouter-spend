@@ -1,0 +1,30 @@
+{
+  "name": "dsh-openrouter-spend",
+  "version": "0.1.0",
+  "description": "DeepSeek Harness plugin: shows what the OpenRouter account actually charged today — under the composer and in Settings, split by model and API key.",
+  "keywords": ["dsh", "dsh-plugin", "cordis", "openrouter", "spend", "cost", "analytics"],
+  "license": "MIT",
+  "author": "Ilya Ryabykin",
+  "type": "module",
+  "engines": { "node": ">=22.19" },
+  "repository": { "type": "git", "url": "git+https://github.com/RyabykinIlya/dsh-openrouter-spend.git" },
+  "homepage": "https://github.com/RyabykinIlya/dsh-openrouter-spend#readme",
+  "bugs": { "url": "https://github.com/RyabykinIlya/dsh-openrouter-spend/issues" },
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg",
+    "./package.json": "./package.json"
+  },
+  "files": ["index.js", "client.js", "cordis.patch.yml", "locale/*.json", "icon.svg", "README.md", "LICENSE", "CHANGELOG.md"],
+  "publishConfig": { "access": "public" },
+  "dependencies": { "schemastery": "^3.18.0" },
+  "dsh": {
+    "bundle": { "patch": "./cordis.patch.yml" },
+    "client": {
+      "platform": "web",
+      "inject": ["@deepseek-ai/dsh-client-ui-conversation", "@deepseek-ai/dsh-client-ui-settings"]
+    }
+  }
+}
