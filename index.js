@@ -37,7 +37,7 @@ const MAX_ANALYTICS_ROWS = 500
  * the API, the credential, or the cadence without an edit to this file.
  */
 export const Config = Schema.object({
-  credentialRef: Schema.string().default('OPENROUTER_MGMT_API_KEY')
+  credentialRef: Schema.string().pattern(/^\S+$/).default('OPENROUTER_MGMT_API_KEY')
     .description('Credentials reference holding the OpenRouter management API key.'),
   apiBase: Schema.string().pattern(/^https:\/\//).default('https://openrouter.ai/api/v1')
     .description('OpenRouter REST API root; https only.'),

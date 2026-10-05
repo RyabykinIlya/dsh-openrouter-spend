@@ -5,9 +5,9 @@
 <h1 align="center">dsh-openrouter-spend</h1>
 
 <p align="center">
-  Real <a href="https://openrouter.ai">OpenRouter</a> spend inside
+  OpenRouter spend inside
   <a href="https://github.com/deepseek-ai/deepseek-harness">DeepSeek Harness</a> —
-  billed money from OpenRouter's own analytics, not a token estimate priced from a local table.
+  billed USD from OpenRouter's own analytics API, not token estimates priced from a local table.
 </p>
 
 <p align="center">
@@ -16,30 +16,34 @@
   <img src="https://img.shields.io/badge/DeepSeek%20Harness-plugin-2f6feb?style=flat-square" alt="DeepSeek Harness plugin">
 </p>
 
-- A live spend chip under the composer: today's cost, with a popover for the last 7 and 30 days.
-- A Settings page with the daily bar chart, a per-model table, per-API-key totals, and the remaining prepaid balance.
-- One cached poll per refresh window: several open tabs cost one request to OpenRouter.
+## What you get
+
+- **Chip under the composer** — spend for the selected range and API key: today, 7 days, or 30 days.
+- **Chip popover** — range and API-key filters, today's spend per model, a daily bar chart across the window, prepaid balance and lifetime spend.
+- **Settings → OpenRouter spend** — store or clear the management key, set the refresh interval, filter by API key.
+
+The host half caches the summary for `refreshSeconds` and coalesces concurrent refreshes, so any number of open tabs cost one OpenRouter query per refresh window. When a refresh fails, the last good figures stay on screen and the reason is shown instead of an empty panel.
 
 ## Requirements
 
-- DeepSeek Harness with the web GUI (the plugin is inactive in headless profiles: it needs the `credentials`, `webServer`, and `connection` services).
-- An OpenRouter **management API key** — Settings → API keys → Management in the OpenRouter dashboard. A regular inference key cannot read analytics.
+- DeepSeek Harness web profile. The plugin needs the `credentials`, `webServer`, and `connection` services and stays inactive in profiles without them (for example, headless).
+- An OpenRouter **Management API key** — OpenRouter dashboard → Settings → Management API Keys → Create New Key ([OpenRouter docs](https://openrouter.ai/docs/guides/overview/auth/management-api-keys)). A regular inference key is rejected: `403 Only management keys can perform this operation`.
 
 ## Install
 
-From npm:
+From npm (`web` is the default web-GUI profile; use your own profile name instead if you run one):
 
 ```sh
-dsh plugin --profile demo add dsh-openrouter-spend
+dsh plugin --profile web add dsh-openrouter-spend
 ```
 
-From GitHub (no build step, so no build-script permission is needed):
+From GitHub (plain JavaScript, no build step and no build-script permission):
 
 ```sh
-dsh plugin --profile demo add github:RyabykinIlya/dsh-openrouter-spend#v0.1.0
+dsh plugin --profile web add github:RyabykinIlya/dsh-openrouter-spend#v0.1.1
 ```
 
-Then open Settings → OpenRouter spend in the GUI and store the management key. Done — the chip starts filling in.
+Then open Settings → OpenRouter spend and paste the management key.
 
 ## Configuration
 
@@ -53,16 +57,19 @@ Every field can be overridden in the profile's `cordis.patch.yml` row; the schem
 | `historyDays` | `30` | 2–366, integer | Days of history the summary window covers, today included |
 | `timeoutMs` | `15000` | 1000–120000, integer | Per-request deadline against OpenRouter |
 
-Viewing preferences (per-key filter, refresh interval override) are browser-local and never leave your machine.
+Viewing preferences (per-key filter, refresh interval override) are browser-local (`localStorage`).
 
-## How it works
+## What the numbers are
 
-The host half queries `POST /api/v1/analytics/query` (`total_usage` and `request_count`, split by API key and model, per UTC day) and `GET /api/v1/credits`, caches the summary for `refreshSeconds`, and serves it to the browser half. When a refresh fails, the last good figures stay on screen and the reason is shown instead of an empty panel.
+- Figures are `total_usage` — USD OpenRouter actually billed — from `POST /api/v1/analytics/query`, grouped per UTC day by API key and model.
+- "Today" is the current UTC day.
+- Balance is `total_credits − total_usage` from `GET /api/v1/credits`: what remains of prepaid credits.
+- The 7-day and 30-day ranges cover at most `historyDays` days; keep `historyDays ≥ 30` for full coverage.
 
 ## Security
 
 - The management key is stored through the Harness credentials service (`credentials.set`), not in this package's files, and is never echoed back to the browser.
-- The summary and credential routes are fenced by the connection trust check. Anyone who can pass that check — by default, the browser session on your local Harness port — can read your spend figures. Do not expose the Harness web port publicly without its own authentication.
+- The summary and credential routes are fenced by the connection trust check. Anyone who passes that check — by default, the browser session on your local Harness port — can read your spend figures. Do not expose the Harness web port publicly without its own authentication.
 
 ## License
 
@@ -70,4 +77,4 @@ The host half queries `POST /api/v1/analytics/query` (`total_usage` and `request
 
 ## По-русски
 
-Плагин для DeepSeek Harness: под полем ввода показывает реальные расходы аккаунта OpenRouter за сегодня (данные из официальной аналитики OpenRouter), а в настройках — график по дням, разбивку по моделям и API-ключам и остаток предоплаченных кредитов. Установка: `dsh plugin --profile demo add dsh-openrouter-spend`, затем Settings → OpenRouter spend → ввести управляющий ключ (Management API key из кабинета OpenRouter).
+Плагин для DeepSeek Harness показывает реальные списания аккаунта OpenRouter (данные из аналитики OpenRouter, в долларах, по UTC-дням): чип под полем ввода с выбором периода сегодня / 7 дней / 30 дней, в поповере — разбивка по моделям за сегодня, график по дням, фильтр по API-ключам и остаток предоплаченных кредитов. В Settings → OpenRouter spend задаётся управляющий ключ и интервал обновления. Установка: `dsh plugin --profile web add dsh-openrouter-spend`; нужен Management API key из кабинета OpenRouter (Settings → Management API Keys) — обычный ключ модели для аналитики не подходит.
