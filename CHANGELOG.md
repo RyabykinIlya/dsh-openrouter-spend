@@ -5,13 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.1] - 2026-10-07
+
+### Removed
+
+- The per-session cost table in the popover: raw session ids overflowed the panel and were unreadable. The chip's `session/day` pair is the only session surface; the per-session split still feeds it.
+
 ## [0.3.0] - 2026-10-06
 
 ### Added
 
-- The composer chip reads `session/day` — this chat's spend today over the whole day's total (`$0.60/$1.50`, `51.00/127.50 ₽` in RUB).
-- A per-session cost table in the popover: window totals, today's figure, and the current chat's row highlighted. Session costs come from `analytics/query` grouped by `session_id`; requests sent without a session (`none`) are excluded.
-- The session split fails soft: when it cannot be read (for example past the 1000-row ceiling), the summary and the chip's day figure stay, with the reason shown in the popover.
+- The composer chip reads `session/day` — this chat's spend today over the whole day's total (`$0.60/$1.50`, `51.00/127.50 ₽` in RUB). The session's cost comes from `analytics/query` grouped by `session_id`; requests sent without a session (`none`) are excluded.
+- A per-session cost table in the popover: window totals, today's figure, and the current chat's row highlighted.
+- The session split fails soft: when it cannot be read (for example past the 1000-row ceiling), the summary and the chip's day figure stay, with the reason kept in the payload.
 
 ## [0.2.0] - 2026-10-06
 

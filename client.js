@@ -143,12 +143,6 @@ window.__ModuleLoader__.load({
         || sessionId === `session-${row.id}`);
     }
 
-    /** A session id is a uuid nobody reads whole in a table cell. */
-    function shortSession(id) {
-      const bare = String(id).replace(/^session-/, '');
-      return bare.length > 12 ? `${bare.slice(0, 12)}…` : bare;
-    }
-
     const fmtInt = value => Number(value || 0).toLocaleString('en-US');
 
     /** A stable color per API key, so one key keeps its hue across reloads. */
@@ -270,7 +264,6 @@ window.__ModuleLoader__.load({
       const chipPair = data?.bySession !== undefined && sessionRow !== undefined
         ? money.fmtPair(sessionRow.todayUsd, data?.todaySpend?.usd ?? 0)
         : undefined;
-      const sessions = data?.bySession ?? [];
 
       if (data !== null && data.status === 'no-credential') {
         return h('span', { className: 'ors-root' },
@@ -340,24 +333,6 @@ window.__ModuleLoader__.load({
                 h('td', null, entry.id),
                 h('td', { className: 'ors-num' }, money.fmt(entry.usd)),
                 h('td', { className: 'ors-num' }, fmtInt(entry.requests)))))),
-          sessions.length > 0 && h('div', { className: 'ors-sub' }, t('bySession')),
-          sessions.length > 0 && h('table', { className: 'ors-table' },
-            h('thead', null, h('tr', null,
-              h('th', null, t('bySession')),
-              h('th', null, money.symbol),
-              h('th', null, t('today')))),
-            h('tbody', null, sessions.map(entry => h('tr', {
-              key: entry.id,
-              title: entry.id,
-              // The current chat's row stands out so "how much does this chat
-              // owe" answers without reading uuids.
-              style: entry.id === sessionId ? { color: keyTint(entry.id) } : undefined,
-            },
-            h('td', null, shortSession(entry.id)),
-            h('td', { className: 'ors-num' }, money.fmt(entry.usd)),
-            h('td', { className: 'ors-num' }, money.fmt(entry.todayUsd)))))),
-          data?.sessionsError === undefined ? null
-            : h('div', { className: 'ors-note' }, data.sessionsError),
           bars.length > 0 && peak > 0 && h('div', { className: 'ors-bars' },
             bars.map(entry => h('div', {
               key: entry.date,
@@ -511,7 +486,6 @@ window.__ModuleLoader__.load({
             lifetime: 'Lifetime',
             byModel: 'Model',
             byKey: 'API key',
-            bySession: 'Session',
             allKeys: 'All keys',
             unknownKey: 'not seen today',
             noCredential: 'No management key',
@@ -544,7 +518,6 @@ window.__ModuleLoader__.load({
             lifetime: '累计',
             byModel: '模型',
             byKey: 'API 密钥',
-            bySession: '会话',
             allKeys: '全部密钥',
             unknownKey: '今天未出现',
             noCredential: '未配置管理密钥',
@@ -577,7 +550,6 @@ window.__ModuleLoader__.load({
             lifetime: 'Всего',
             byModel: 'Модель',
             byKey: 'API-ключ',
-            bySession: 'Сессия',
             allKeys: 'Все ключи',
             unknownKey: 'сегодня не было',
             noCredential: 'Ключ не настроен',
