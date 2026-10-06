@@ -1,7 +1,7 @@
 {
   "name": "dsh-openrouter-spend",
-  "version": "0.2.0",
-  "description": "DeepSeek Harness plugin: shows what the OpenRouter account actually charged today — under the composer and in Settings, split by model and API key.",
+  "version": "0.3.0",
+  "description": "DeepSeek Harness plugin: shows what the OpenRouter account actually charged today — per chat and in total, under the composer and in Settings, split by model and API key.",
   "keywords": ["dsh", "dsh-plugin", "cordis", "openrouter", "spend", "cost", "analytics"],
   "license": "MIT",
   "author": "Ilya Ryabykin",

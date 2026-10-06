@@ -32,6 +32,9 @@ const MAX_REPLY_BYTES = 4 * 1024 * 1024
 /** Rows beyond this are refused rather than truncated: a partial split misreports cost. */
 const MAX_ANALYTICS_ROWS = 500
 
+/** The session split is one row per session, not per session and day; the server caps at 1000. */
+const MAX_SESSION_ROWS = 1000
+
 /** The CBR sheet is a dozen kilobytes; a larger reply is not a rate sheet. */
 const MAX_RATE_BYTES = 256 * 1024
 
@@ -108,6 +111,77 @@ async function queryAnalytics(config, credential, start, end, signal) {
     const read = readRow(row)
     return read === undefined ? [] : [read]
   })
+}
+
+/**
+ * Read one session split row. Same wire narrowing as `readRow`; the `none`
+ * bucket collects requests sent without a session id and belongs to no chat.
+ * @returns the row, or `undefined` when it carries no usable session or cost.
+ */
+function readSessionRow(row) {
+  if (row === null || typeof row !== 'object') return undefined
+  const id = row.session_id
+  const usd = Number(row.total_usage)
+  const requests = Number(row.request_count)
+  if (typeof id !== 'string' || id.length === 0 || id === 'none') return undefined
+  if (!Number.isFinite(usd) || !Number.isFinite(requests)) return undefined
+  return { id, usd, requests }
+}
+
+/**
+ * Fetch the spend split by session over a time range, without granularity: one
+ * row per session for the whole range, so the row count is bounded by the
+ * number of sessions rather than sessions multiplied by days.
+ */
+async function querySessions(config, credential, start, end, signal) {
+  const url = `${config.apiBase.replace(/\/+$/, '')}/analytics/query`
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: { authorization: `Bearer ${credential}`, 'content-type': 'application/json' },
+    body: JSON.stringify({
+      metrics: ['total_usage', 'request_count'],
+      dimensions: ['session_id'],
+      time_range: { start, end },
+      limit: MAX_SESSION_ROWS,
+    }),
+    signal,
+  })
+  if (!response.ok) {
+    const detail = (await response.text()).slice(0, 200)
+    throw new Error(`analytics/query (sessions) answered ${response.status}: ${detail}`)
+  }
+  const length = Number(response.headers.get('content-length') ?? 0)
+  if (Number.isFinite(length) && length > MAX_REPLY_BYTES) {
+    throw new Error(`analytics/query (sessions) reply exceeds ${MAX_REPLY_BYTES} bytes`)
+  }
+  const body = await response.json()
+  const rows = body?.data?.data
+  if (!Array.isArray(rows)) throw new Error('analytics/query (sessions) returned no rows')
+  // A truncated split sums to less than the summary says; refuse instead.
+  if (body?.data?.metadata?.truncated === true || rows.length >= MAX_SESSION_ROWS) {
+    throw new Error(`analytics/query (sessions) hit its ${MAX_SESSION_ROWS}-row ceiling; narrow config.historyDays`)
+  }
+  return rows.flatMap(row => {
+    const read = readSessionRow(row)
+    return read === undefined ? [] : [read]
+  })
+}
+
+/**
+ * Merge the window's session rows with today's: window totals carry the
+ * popover list, today's figures carry the chip's session half.
+ * @returns the per-session split, most recent spend first.
+ */
+function mergeSessions(windowRows, todayRows) {
+  const merged = new Map()
+  for (const row of windowRows) merged.set(row.id, { ...row, todayUsd: 0, todayRequests: 0 })
+  for (const row of todayRows) {
+    const entry = merged.get(row.id)
+    if (entry === undefined) merged.set(row.id, { ...row, todayUsd: row.usd, todayRequests: row.requests })
+    else { entry.todayUsd = row.usd; entry.todayRequests = row.requests }
+  }
+  return [...merged.values()]
+    .sort((left, right) => (right.todayUsd - left.todayUsd) || (right.usd - left.usd))
 }
 
 /** Read the prepaid credits balance, which is the account's remaining budget. */
@@ -263,18 +337,30 @@ function byModel(rows, today) {
 
 /**
  * Build the one summary the browser half renders: today's spend, trailing
- * windows, the daily series, per-model and per-key splits, and the balance.
- * `rateInfo` answers the RUB rate (or the reason it is missing) on the same
- * refresh, so RUB display costs no extra round trip.
+ * windows, the daily series, per-model, per-key and per-session splits, and
+ * the balance. `rateInfo` answers the RUB rate (or the reason it is missing)
+ * on the same refresh, so RUB display costs no extra round trip. The session
+ * split is auxiliary: its failure lands in `sessionsError` and never takes
+ * the rest of the summary down with it.
  */
 async function collect(config, credential, signal, rateInfo) {
   const now = new Date()
   const end = new Date(now.getTime() + 60_000).toISOString()
   const start = startOfUtcDay(now, config.historyDays - 1)
-  const [rows, credits, rate] = await Promise.all([
+  const sessions = querySessions(config, credential, start, end, signal)
+    .then(async windowRows => {
+      const todayStart = startOfUtcDay(now, 0)
+      const todayRows = await querySessions(config, credential, todayStart, end, signal)
+      return { bySession: mergeSessions(windowRows, todayRows) }
+    })
+    .catch(error => ({
+      sessionsError: error instanceof Error ? error.message : String(error),
+    }))
+  const [rows, credits, rate, sessionSplit] = await Promise.all([
     queryAnalytics(config, credential, start, end, signal),
     queryCredits(config, credential, signal),
     rateInfo(),
+    sessions,
   ])
   const today = utcDay(now)
   const series = dailySeries(rows, config.historyDays, now)
@@ -291,8 +377,10 @@ async function collect(config, credential, signal, rateInfo) {
     byModel: byModel(rows, today),
     byKey: byKey(rows, today, series),
     // `rate` is always present: rubles per dollar, or null when cbr.ru failed
-    // — then `rateError` carries the reason for the panel to show.
+    // — then `rateError` carries the reason for the panel to show. The session
+    // split is `bySession`, or `sessionsError` when the split could not be read.
     ...rate,
+    ...sessionSplit,
     credits,
   }
 }
@@ -348,6 +436,7 @@ function emptyPayload(config) {
     byDay: [],
     byModel: [],
     byKey: [],
+    bySession: [],
     rate: null,
   }
 }

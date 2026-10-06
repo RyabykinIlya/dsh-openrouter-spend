@@ -19,17 +19,17 @@
 ## What you get
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/RyabykinIlya/dsh-openrouter-spend/v0.2.0/docs/chip.png" width="640" alt="Spend chip under the composer"><br>
-  <sub>The chip under the composer: billed spend for the selected range, next to the session's token and context stats.</sub>
+  <img src="https://raw.githubusercontent.com/RyabykinIlya/dsh-openrouter-spend/v0.3.0/docs/chip.png" width="640" alt="Spend chip under the composer"><br>
+  <sub>The chip under the composer: this chat's spend over the day's total, next to the session's token and context stats.</sub>
 </p>
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/RyabykinIlya/dsh-openrouter-spend/v0.2.0/docs/popover.png" width="340" alt="Spend popover"><br>
-  <sub>The popover: range and API-key filters, today's spend per model, daily bars, prepaid balance and lifetime spend.</sub>
+  <img src="https://raw.githubusercontent.com/RyabykinIlya/dsh-openrouter-spend/v0.3.0/docs/popover.png" width="340" alt="Spend popover"><br>
+  <sub>The popover: range and API-key filters, today's spend per model, per-session costs, daily bars, prepaid balance and lifetime spend.</sub>
 </p>
 
-- **Chip under the composer** — spend for the selected range and API key: today, 7 days, or 30 days.
-- **Chip popover** — range and API-key filters, today's spend per model, a daily bar chart across the window, prepaid balance and lifetime spend.
+- **Chip under the composer** — `session/day`: what this chat spent today over the whole day's spend, for the selected range and API key (today, 7 days, or 30 days).
+- **Chip popover** — range and API-key filters, today's spend per model, a per-session cost table (this chat highlighted), a daily bar chart across the window, prepaid balance and lifetime spend.
 - **Settings → OpenRouter spend** — store or clear the management key, pick the display currency (USD, or RUB at the cbr.ru rate), set the refresh interval, filter by API key.
 
 The host half caches the summary for `refreshSeconds` and coalesces concurrent refreshes, so any number of open tabs cost one OpenRouter query per refresh window. When a refresh fails, the last good figures stay on screen and the reason is shown instead of an empty panel.
@@ -50,7 +50,7 @@ dsh plugin --profile web add dsh-openrouter-spend
 From GitHub (plain JavaScript, no build step and no build-script permission):
 
 ```sh
-dsh plugin --profile web add github:RyabykinIlya/dsh-openrouter-spend#v0.2.0
+dsh plugin --profile web add github:RyabykinIlya/dsh-openrouter-spend#v0.3.0
 ```
 
 Then open Settings → OpenRouter spend and paste the management key.
@@ -78,6 +78,7 @@ Viewing preferences (display currency, per-key filter, refresh interval override
 - Balance is `total_credits − total_usage` from `GET /api/v1/credits`: what remains of prepaid credits.
 - The 7-day and 30-day ranges cover at most `historyDays` days; keep `historyDays ≥ 30` for full coverage.
 - RUB display converts those USD figures at the cbr.ru daily rate, read host-side and cached for `rateRefreshSeconds`. When cbr.ru cannot be reached, the figures stay in USD and the panel says so, with the fetch reason and a hint to check the connection.
+- Per-session costs come from the same `analytics/query`, grouped by `session_id`. The harness stamps each request with its Session id (`x-session-id`), so a chat's cost is its own row; the chip shows `session/day` and the popover lists every session in the window. The `none` bucket (requests sent without a session) is excluded — it belongs to no chat.
 
 ## Security
 
@@ -90,4 +91,4 @@ Viewing preferences (display currency, per-key filter, refresh interval override
 
 ## По-русски
 
-Плагин для DeepSeek Harness показывает реальные списания аккаунта OpenRouter (данные из аналитики OpenRouter, в долларах, по UTC-дням): чип под полем ввода с выбором периода сегодня / 7 дней / 30 дней, в поповере — разбивка по моделям за сегодня, график по дням, фильтр по API-ключам и остаток предоплаченных кредитов. В Settings → OpenRouter spend задаётся управляющий ключ, валюта отображения (USD или RUB по курсу ЦБ РФ), интервал обновления и фильтр по API-ключу. Если cbr.ru недоступен, суммы остаются в USD, а панель просит проверить подключение к cbr.ru. Установка: `dsh plugin --profile web add dsh-openrouter-spend`; нужен Management API key из кабинета OpenRouter (Settings → Management API Keys) — обычный ключ модели для аналитики не подходит.
+Плагин для DeepSeek Harness показывает реальные списания аккаунта OpenRouter (данные из аналитики OpenRouter, в долларах, по UTC-дням): чип под полем ввода — `сегодня по чату / всего за сегодня`, в поповере — выбор периода сегодня / 7 дней / 30 дней, разбивка по моделям за сегодня, стоимость по каждой сессии (текущий чат подсвечен), график по дням, фильтр по API-ключам и остаток предоплаченных кредитов. В Settings → OpenRouter spend задаётся управляющий ключ, валюта отображения (USD или RUB по курсу ЦБ РФ), интервал обновления и фильтр по API-ключу. Если cbr.ru недоступен, суммы остаются в USD, а панель просит проверить подключение к cbr.ru. Установка: `dsh plugin --profile web add dsh-openrouter-spend`; нужен Management API key из кабинета OpenRouter (Settings → Management API Keys) — обычный ключ модели для аналитики не подходит.

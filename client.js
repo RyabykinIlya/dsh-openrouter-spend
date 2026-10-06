@@ -105,12 +105,48 @@ window.__ModuleLoader__.load({
     function makeMoney(currency, perUsd) {
       const rate = Number(perUsd);
       const rub = currency === 'RUB' && Number.isFinite(rate) && rate > 0;
+      const scale = value => (Number(value) || 0) * (rub ? rate : 1);
+      const fmt = value => fmtMoney(scale(value), rub ? 'RUB' : 'USD');
       return {
         rub,
         perUsd: rub ? rate : undefined,
         symbol: rub ? '₽' : '$',
-        fmt: value => fmtMoney(rub ? (Number(value) || 0) * rate : value, rub ? 'RUB' : 'USD'),
+        fmt,
+        /**
+         * Two figures under one currency sign — `session/day` reads as one
+         * money pair, not as two amounts (`$0.85/$1.50`, `0.85/1.50 ₽`).
+         * The pair shares one precision: mixing `$0.600/$1.50` would read as
+         * two unrelated figures. Below a hundredth both halves keep 4 digits
+         * so a rounding to zero does not claim a session spent nothing.
+         */
+        fmtPair: (first, second) => {
+          const scale = value => (Number(value) || 0) * (rub ? rate : 1);
+          const magnitude = value => Math.abs(scale(value));
+          const anyCents = magnitude(first) >= 0.01 || magnitude(second) >= 0.01;
+          const digits = anyCents ? 2 : 4;
+          const left = scale(first).toFixed(digits);
+          const right = scale(second).toFixed(digits);
+          return rub ? `${left}/${right} ₽` : `$${left}/$${right}`;
+        },
       };
+    }
+
+    /**
+     * The analytics row for this chat. The harness stamps its Session id as the
+     * `x-session-id` header, so OpenRouter echoes it verbatim; the bare-UUID
+     * match is kept for clients that send the id unprefixed.
+     */
+    function findSession(bySession, sessionId) {
+      if (!Array.isArray(bySession) || typeof sessionId !== 'string' || sessionId.length === 0) return undefined;
+      return bySession.find(row => row.id === sessionId
+        || row.id === `session-${sessionId}`
+        || sessionId === `session-${row.id}`);
+    }
+
+    /** A session id is a uuid nobody reads whole in a table cell. */
+    function shortSession(id) {
+      const bare = String(id).replace(/^session-/, '');
+      return bare.length > 12 ? `${bare.slice(0, 12)}…` : bare;
     }
 
     const fmtInt = value => Number(value || 0).toLocaleString('en-US');
@@ -156,7 +192,7 @@ window.__ModuleLoader__.load({
     }
 
     function Pill(props) {
-      const { t } = props;
+      const { t, sessionId } = props;
       const [data, setData] = useState(null);
       const [open, setOpen] = useState(false);
       const [range, setRange] = useState('today');
@@ -227,6 +263,14 @@ window.__ModuleLoader__.load({
       const money = makeMoney(currency, data?.rate?.perUsd);
       // RUB was chosen but cbr.ru answered no rate: figures stay in USD and say so.
       const rubUnavailable = currency === 'RUB' && data !== null && !money.rub;
+      // This chat's spend today over the whole day's spend; the pair only lands
+      // when the host read a session split — otherwise the chip stays a single
+      // figure rather than showing an unverifiable zero.
+      const sessionRow = findSession(data?.bySession, sessionId);
+      const chipPair = data?.bySession !== undefined && sessionRow !== undefined
+        ? money.fmtPair(sessionRow.todayUsd, data?.todaySpend?.usd ?? 0)
+        : undefined;
+      const sessions = data?.bySession ?? [];
 
       if (data !== null && data.status === 'no-credential') {
         return h('span', { className: 'ors-root' },
@@ -247,7 +291,8 @@ window.__ModuleLoader__.load({
           onClick: () => setOpen(value => !value),
         },
         h('span', { className: 'ors-chip-dot', 'data-state': data?.status ?? 'loading' }),
-        h('span', { className: 'ors-chip-amount' }, data === null ? t('loading') : money.fmt(view.usd))),
+        h('span', { className: 'ors-chip-amount' },
+          data === null ? t('loading') : chipPair ?? money.fmt(view.usd))),
         open && h('div', { className: 'ors-panel' },
           h('div', { className: 'ors-head' },
             h('span', { className: 'ors-label' }, rangeLabel),
@@ -295,6 +340,24 @@ window.__ModuleLoader__.load({
                 h('td', null, entry.id),
                 h('td', { className: 'ors-num' }, money.fmt(entry.usd)),
                 h('td', { className: 'ors-num' }, fmtInt(entry.requests)))))),
+          sessions.length > 0 && h('div', { className: 'ors-sub' }, t('bySession')),
+          sessions.length > 0 && h('table', { className: 'ors-table' },
+            h('thead', null, h('tr', null,
+              h('th', null, t('bySession')),
+              h('th', null, money.symbol),
+              h('th', null, t('today')))),
+            h('tbody', null, sessions.map(entry => h('tr', {
+              key: entry.id,
+              title: entry.id,
+              // The current chat's row stands out so "how much does this chat
+              // owe" answers without reading uuids.
+              style: entry.id === sessionId ? { color: keyTint(entry.id) } : undefined,
+            },
+            h('td', null, shortSession(entry.id)),
+            h('td', { className: 'ors-num' }, money.fmt(entry.usd)),
+            h('td', { className: 'ors-num' }, money.fmt(entry.todayUsd)))))),
+          data?.sessionsError === undefined ? null
+            : h('div', { className: 'ors-note' }, data.sessionsError),
           bars.length > 0 && peak > 0 && h('div', { className: 'ors-bars' },
             bars.map(entry => h('div', {
               key: entry.date,
@@ -448,6 +511,7 @@ window.__ModuleLoader__.load({
             lifetime: 'Lifetime',
             byModel: 'Model',
             byKey: 'API key',
+            bySession: 'Session',
             allKeys: 'All keys',
             unknownKey: 'not seen today',
             noCredential: 'No management key',
@@ -480,6 +544,7 @@ window.__ModuleLoader__.load({
             lifetime: '累计',
             byModel: '模型',
             byKey: 'API 密钥',
+            bySession: '会话',
             allKeys: '全部密钥',
             unknownKey: '今天未出现',
             noCredential: '未配置管理密钥',
@@ -512,6 +577,7 @@ window.__ModuleLoader__.load({
             lifetime: 'Всего',
             byModel: 'Модель',
             byKey: 'API-ключ',
+            bySession: 'Сессия',
             allKeys: 'Все ключи',
             unknownKey: 'сегодня не было',
             noCredential: 'Ключ не настроен',
