@@ -24,7 +24,7 @@
 </p>
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/RyabykinIlya/dsh-openrouter-spend/v0.3.1/docs/popover.png" width="340" alt="Spend popover"><br>
+  <img src="https://raw.githubusercontent.com/RyabykinIlya/dsh-openrouter-spend/v0.3.2/docs/popover.png" width="340" alt="Spend popover"><br>
   <sub>The popover: range and API-key filters, today's spend per model, daily bars, prepaid balance and lifetime spend.</sub>
 </p>
 
@@ -50,7 +50,7 @@ dsh plugin --profile web add dsh-openrouter-spend
 From GitHub (plain JavaScript, no build step and no build-script permission):
 
 ```sh
-dsh plugin --profile web add github:RyabykinIlya/dsh-openrouter-spend#v0.3.1
+dsh plugin --profile web add github:RyabykinIlya/dsh-openrouter-spend#v0.3.2
 ```
 
 Then open Settings → OpenRouter spend and paste the management key.
