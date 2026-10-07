@@ -19,7 +19,7 @@
 ## What you get
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/RyabykinIlya/dsh-openrouter-spend/v0.3.1/docs/chip.png" width="640" alt="Spend chip under the composer"><br>
+  <img src="https://raw.githubusercontent.com/RyabykinIlya/dsh-openrouter-spend/main/docs/chip2.png" width="640" alt="Spend chip under the composer"><br>
   <sub>The chip under the composer: this chat's spend over the day's total, next to the session's token and context stats.</sub>
 </p>
 
