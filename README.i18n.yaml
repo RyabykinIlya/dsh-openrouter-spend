@@ -1,0 +1,8 @@
+# Translation consistency record for README files
+# Each hash represents the content of the corresponding README file.
+# After updating translations, run: npm run verify-translation -- --write
+
+hashes:
+  en: 60b3bdff785dca6f
+  zh: cd02e47f52caae0a
+  ru: 3e91c9651060921e

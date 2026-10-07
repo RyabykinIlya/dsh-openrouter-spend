@@ -1,0 +1,14 @@
+# Git hooks configuration for translation consistency checks
+# Managed by lefthook: https://github.com/evilmartians/lefthook
+
+pre-commit:
+  commands:
+    translation-sync:
+      glob: "README*.md"
+      run: node scripts/verify-translation-sync.mjs
+      stage_fixed: false
+
+pre-push:
+  commands:
+    translation-sync:
+      run: node scripts/verify-translation-sync.mjs
