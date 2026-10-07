@@ -16,6 +16,10 @@
   <img src="https://img.shields.io/badge/DeepSeek%20Harness-plugin-2f6feb?style=flat-square" alt="DeepSeek Harness plugin">
 </p>
 
+<p align="center">
+  English | <a href="README.zh.md">中文</a> | <a href="README.ru.md">Русский</a>
+</p>
+
 ## What you get
 
 <p align="center">
@@ -88,7 +92,3 @@ Viewing preferences (display currency, per-key filter, refresh interval override
 ## License
 
 [MIT](./LICENSE). Unofficial plugin; not affiliated with OpenRouter or DeepSeek.
-
-## По-русски
-
-Плагин для DeepSeek Harness показывает реальные списания аккаунта OpenRouter (данные из аналитики OpenRouter, в долларах, по UTC-дням): чип под полем ввода — `сегодня по чату / всего за сегодня`, в поповере — выбор периода сегодня / 7 дней / 30 дней, разбивка по моделям за сегодня, график по дням, фильтр по API-ключам и остаток предоплаченных кредитов. В Settings → OpenRouter spend задаётся управляющий ключ, валюта отображения (USD или RUB по курсу ЦБ РФ), интервал обновления и фильтр по API-ключу. Если cbr.ru недоступен, суммы остаются в USD, а панель просит проверить подключение к cbr.ru. Установка: `dsh plugin --profile web add dsh-openrouter-spend`; нужен Management API key из кабинета OpenRouter (Settings → Management API Keys) — обычный ключ модели для аналитики не подходит.
