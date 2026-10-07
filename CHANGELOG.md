@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- The chip's `session/day` session half now covers the session's whole delegated subtree, folded in recursively. A delegated subagent runs as its own DSH session and is billed on its own analytics row, so its spend used to be invisible to the parent chat's figure; the host now attributes each session row the spend of every descendant it delegated, grandchildren included. The account-wide figures (today, 7 and 30 days, per key, per model, per day) already included descendant spend and are unchanged. See [ADR 0003](https://github.com/RyabykinIlya/dsh-openrouter-spend/blob/main/docs/adr/0003-count-subagent-descendants-in-session-spend.md) (the ADR log ships with the repository, not the npm package).
+
 ## [0.3.2] - 2026-10-07
 
 ### Changed

@@ -14,8 +14,14 @@ import Schema from 'schemastery'
 /** Loader row id; matches the `insert` in cordis.patch.yml. */
 export const name = 'openrouter-spend'
 
-/** `credentials` resolves the management key, `webServer` carries the route. */
-export const inject = ['credentials', 'webServer', 'connection']
+/**
+ * `credentials` resolves the management key, `webServer` carries the route.
+ * `sessionQuery` supplies session lineage: a delegated subagent runs as its own
+ * session, so its spend lands on its own analytics row and must be folded into
+ * the parent's figure (ADR-0003). Declaring it here is deliberate — the row is
+ * a DSH bundle row, and Cordis starts it only once the service exists.
+ */
+export const inject = ['credentials', 'webServer', 'connection', 'sessionQuery']
 
 /** One read-only summary route, fenced by the connection trust check. */
 const SUMMARY_PATH = '/openrouter-spend/summary'
@@ -34,6 +40,21 @@ const MAX_ANALYTICS_ROWS = 500
 
 /** The session split is one row per session, not per session and day; the server caps at 1000. */
 const MAX_SESSION_ROWS = 1000
+
+/**
+ * How far one row's spend climbs towards its ancestors. Real delegation nests a
+ * handful deep — the measured corpus held depths of 1 and 2 — so a longer chain
+ * is a corrupt lineage, and the walk stops rather than trusting it.
+ */
+const MAX_LINEAGE_DEPTH = 64
+
+/**
+ * Ceiling on the rolled-up split. `MAX_SESSION_ROWS` bounds the rows read; the
+ * rollup can add a row per ancestor, so a corrupt corpus could otherwise fan a
+ * thousand leaves into an unbounded payload. Past this the fold is refused —
+ * the caller keeps the unrolled rows and says why.
+ */
+const MAX_ROLLUP_ROWS = 5000
 
 /** The CBR sheet is a dozen kilobytes; a larger reply is not a rate sheet. */
 const MAX_RATE_BYTES = 256 * 1024
@@ -172,7 +193,7 @@ async function querySessions(config, credential, start, end, signal) {
  * popover list, today's figures carry the chip's session half.
  * @returns the per-session split, most recent spend first.
  */
-function mergeSessions(windowRows, todayRows) {
+export function mergeSessions(windowRows, todayRows) {
   const merged = new Map()
   for (const row of windowRows) merged.set(row.id, { ...row, todayUsd: 0, todayRequests: 0 })
   for (const row of todayRows) {
@@ -182,6 +203,127 @@ function mergeSessions(windowRows, todayRows) {
   }
   return [...merged.values()]
     .sort((left, right) => (right.todayUsd - left.todayUsd) || (right.usd - left.usd))
+}
+
+/**
+ * Narrow session headers to the delegation edges the rollup folds along.
+ *
+ * `parentSession` alone is not enough: a forked session also records a parent,
+ * but it is a branch of the same work rather than work the parent delegated,
+ * and its spend already reached OpenRouter under its own id. Only a child the
+ * harness marked `origin: 'subagent'` is a delegated subagent — the field every
+ * in-process delegation sets and neither fork path does (ADR-0003).
+ * @param records - logical session records as `ctx.sessionQuery` returns them.
+ * @returns `parent id → child ids`, delegation only.
+ */
+export function delegationEdges(records) {
+  const childrenByParent = new Map()
+  for (const record of records ?? []) {
+    const header = record?.header
+    if (header?.origin !== 'subagent') continue
+    const id = header.id
+    if (typeof id !== 'string' || id.length === 0) continue
+    const parent = header.parentSession
+    if (typeof parent !== 'string' || parent.length === 0) continue
+    const children = childrenByParent.get(parent)
+    if (children === undefined) childrenByParent.set(parent, [id])
+    else children.push(id)
+  }
+  return childrenByParent
+}
+
+/**
+ * Read session lineage from the harness: one listing of logical session
+ * headers, narrowed to the delegation edges the rollup needs. A delegated
+ * subagent runs as its own session, so this is the only place the parent link
+ * exists (ADR-0003).
+ * @returns `parent id → child ids` for delegated children.
+ */
+async function queryLineage(ctx, signal) {
+  return delegationEdges(await ctx.sessionQuery.listSessions(signal))
+}
+
+/**
+ * Fold each session's delegated subtrees into its own figures, recursively —
+ * a grandchild's spend belongs to the whole chain above it, and delegation
+ * nests. A session whose own traffic never reached OpenRouter still gets a row
+ * when something it delegated spent, or the figure would be unreachable from
+ * exactly the chats that delegated the work.
+ *
+ * The response keeps the shape the browser half already reads: `usd`,
+ * `requests`, `todayUsd`, `todayRequests`, now meaning "this session plus the
+ * work it delegated" rather than the session's own requests alone.
+ * @param rows - the merged per-session split, before the rollup.
+ * @param lineage - `childrenByParent`, delegation edges only (see `delegationEdges`).
+ * @returns the rolled-up split, most recent spend first.
+ */
+export function rollupSessions(rows, lineage) {
+  const parentOf = new Map()
+  for (const [parent, children] of lineage.childrenByParent) {
+    for (const child of children) if (!parentOf.has(child)) parentOf.set(child, parent)
+  }
+  const subtree = new Map()
+  const bump = (id, row) => {
+    const entry = subtree.get(id) ?? { usd: 0, requests: 0, todayUsd: 0, todayRequests: 0 }
+    entry.usd += row.usd
+    entry.requests += row.requests
+    entry.todayUsd += row.todayUsd
+    entry.todayRequests += row.todayRequests
+    subtree.set(id, entry)
+  }
+  for (const row of rows) {
+    // A row's spend counts for the session itself and for every ancestor. The
+    // seen-set guards against a cycle and the depth cap against a chain long
+    // enough to stall the refresh: lineage is read from disk, and a corrupt
+    // header must neither hang the poll nor inflate the figure without bound.
+    const seen = new Set([row.id])
+    bump(row.id, row)
+    let parent = parentOf.get(row.id)
+    while (typeof parent === 'string' && !seen.has(parent) && seen.size <= MAX_LINEAGE_DEPTH) {
+      seen.add(parent)
+      bump(parent, row)
+      parent = parentOf.get(parent)
+    }
+  }
+  // Every row id was bumped into `subtree` above, so its keys already cover the
+  // input ids; the ancestors it gained are the only additions.
+  if (subtree.size > MAX_ROLLUP_ROWS) {
+    throw new Error(`session rollup grew to ${subtree.size} rows, past the ${MAX_ROLLUP_ROWS}-row ceiling; lineage looks corrupt`)
+  }
+  return [...subtree.keys()]
+    .map(id => {
+      const { usd, requests, todayUsd, todayRequests } = subtree.get(id)
+      return { id, usd, requests, todayUsd, todayRequests }
+    })
+    .sort((left, right) => (right.todayUsd - left.todayUsd) || (right.usd - left.usd))
+}
+
+/**
+ * Roll the split up with lineage, containing a failed lineage read: own-session
+ * figures plus a reported reason beat no figures at all, so a chat understates
+ * rather than losing the chip (ADR-0003). Takes the reader as a callback so the
+ * containment is exercisable without a live harness.
+ * @param merged - the merged per-session split, before the rollup.
+ * @param readLineage - reads `parent id → child ids`; may reject.
+ * @param onError - reports a failed read, typically to the host log.
+ * @returns the summary fragment the payload carries.
+ */
+export async function rollupWithLineage(merged, readLineage, onError) {
+  try {
+    const childrenByParent = await readLineage()
+    return { bySession: rollupSessions(merged, { childrenByParent }) }
+  } catch (error) {
+    // A reporter that throws must not undo the containment it reports for:
+    // the figures are already known good, so the failure to log them is
+    // swallowed rather than allowed to take the split down.
+    try {
+      onError(error)
+    } catch { /* reporting is best-effort */ }
+    return {
+      bySession: merged,
+      lineageError: error instanceof Error ? error.message : String(error),
+    }
+  }
 }
 
 /** Read the prepaid credits balance, which is the account's remaining budget. */
@@ -341,9 +483,11 @@ function byModel(rows, today) {
  * the balance. `rateInfo` answers the RUB rate (or the reason it is missing)
  * on the same refresh, so RUB display costs no extra round trip. The session
  * split is auxiliary: its failure lands in `sessionsError` and never takes
- * the rest of the summary down with it.
+ * the rest of the summary down with it. A lineage read that fails is contained
+ * the same way — the rows keep their own figures and `lineageError` says why —
+ * so the chip understates rather than disappearing (ADR-0003).
  */
-async function collect(config, credential, signal, rateInfo) {
+async function collect(ctx, config, credential, signal, rateInfo) {
   const now = new Date()
   const end = new Date(now.getTime() + 60_000).toISOString()
   const start = startOfUtcDay(now, config.historyDays - 1)
@@ -351,7 +495,12 @@ async function collect(config, credential, signal, rateInfo) {
     .then(async windowRows => {
       const todayStart = startOfUtcDay(now, 0)
       const todayRows = await querySessions(config, credential, todayStart, end, signal)
-      return { bySession: mergeSessions(windowRows, todayRows) }
+      const merged = mergeSessions(windowRows, todayRows)
+      return rollupWithLineage(
+        merged,
+        () => queryLineage(ctx, signal),
+        error => ctx.logger.warn('openrouter-spend: session lineage unavailable', error),
+      )
     })
     .catch(error => ({
       sessionsError: error instanceof Error ? error.message : String(error),
@@ -501,7 +650,7 @@ export function apply(ctx, config) {
     }
     const signal = AbortSignal.timeout(config.timeoutMs)
     try {
-      return { ...(await collect(config, resolved.value, signal, rateInfo)), credential }
+      return { ...(await collect(ctx, config, resolved.value, signal, rateInfo)), credential }
     } catch (error) {
       // A stale reply beats an empty panel: keep the last good figures and say why.
       const reason = error instanceof Error ? error.message : String(error)

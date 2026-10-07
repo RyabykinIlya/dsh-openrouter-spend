@@ -82,7 +82,7 @@ Viewing preferences (display currency, per-key filter, refresh interval override
 - Balance is `total_credits − total_usage` from `GET /api/v1/credits`: what remains of prepaid credits.
 - The 7-day and 30-day ranges cover at most `historyDays` days; keep `historyDays ≥ 30` for full coverage.
 - RUB display converts those USD figures at the cbr.ru daily rate, read host-side and cached for `rateRefreshSeconds`. When cbr.ru cannot be reached, the figures stay in USD and the panel says so, with the fetch reason and a hint to check the connection.
-- The chip's session half comes from the same `analytics/query`, grouped by `session_id`. The harness stamps each request with its Session id (`x-session-id`), so a chat's cost is its own figure; the chip shows `session/day`. The `none` bucket (requests sent without a session) is excluded — it belongs to no chat.
+- The chip's session half comes from the same `analytics/query`, grouped by `session_id`. The harness stamps each request with its Session id (`x-session-id`), and the host folds each session's delegated subagent sessions into its row, recursively: a delegated child runs as its own session and is billed on its own analytics row, so the figure is this session plus everything it delegated, and the chip shows `session/day`. The `none` bucket (requests sent without a session) is excluded — it belongs to no chat. The account-wide figures (today, 7 and 30 days, per key, per model, per day) already include descendant spend and are unchanged.
 
 ## Security
 

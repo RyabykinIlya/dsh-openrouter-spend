@@ -81,7 +81,7 @@ dsh plugin --profile web add github:RyabykinIlya/dsh-openrouter-spend#v0.3.2
 - 余额是来自 `GET /api/v1/credits` 的 `total_credits − total_usage`：预付信用的剩余部分。
 - 7天和30天范围最多涵盖 `historyDays` 天；保持 `historyDays ≥ 30` 以实现完整覆盖。
 - 卢布显示按 cbr.ru 每日汇率转换这些美元数据，在主机端读取并缓存 `rateRefreshSeconds` 秒。当无法访问 cbr.ru 时，数据保持美元显示，面板会说明原因并提示检查连接。
-- 芯片的会话部分来自同一 `analytics/query`，按 `session_id` 分组。Harness 用会话 ID（`x-session-id`）标记每个请求，因此对话的成本是其自身的数据；芯片显示 `会话/今日`。`none` 桶（无会话发送的请求）被排除 — 它不属于任何对话。
+- 芯片的会话部分来自同一 `analytics/query`，按 `session_id` 分组。Harness 用会话 ID（`x-session-id`）标记每个请求，主机端会把该会话委派的子代理会话递归归并到它的行中：委派的子会话作为独立会话运行，并在自己的分析行中计费，因此该数字是"本会话加上它委派的全部内容"，芯片显示 `会话/今日`。`none` 桶（无会话发送的请求）被排除 — 它不属于任何对话。账户级数据（今日、7天、30天、按密钥、按模型、按天）已经包含后代支出，保持不变。
 
 ## 安全性
 
