@@ -1,6 +1,6 @@
 {
   "name": "dsh-openrouter-spend",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "DeepSeek Harness plugin: shows what the OpenRouter account actually charged today — per chat and in total, under the composer and in Settings, split by model and API key.",
   "keywords": [
     "dsh",
@@ -39,6 +39,9 @@
     "locale/*.json",
     "icon.svg",
     "README.md",
+    "README.ru.md",
+    "README.zh.md",
+    "README.i18n.yaml",
     "LICENSE",
     "CHANGELOG.md"
   ],
@@ -47,8 +50,7 @@
   },
   "scripts": {
     "test": "node --test tests/*.test.mjs",
-    "verify-translation": "node scripts/verify-translation-sync.mjs",
-    "postinstall": "lefthook install || true"
+    "verify-translation": "node scripts/verify-translation-sync.mjs"
   },
   "dependencies": {
     "schemastery": "^3.18.0"

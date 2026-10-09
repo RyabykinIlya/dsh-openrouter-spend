@@ -2,6 +2,17 @@
 
 Thank you for your interest in contributing to this project!
 
+## Development Setup
+
+After cloning the repository:
+
+```sh
+npm install
+npx lefthook install
+```
+
+The second command installs the git hooks (pre-commit and pre-push). Hooks are not installed automatically: the published package deliberately ships no install-time lifecycle scripts, so registry consumers never run lefthook — each contributor opts in with the command above.
+
 ## Language Requirements
 
 **All releases, changelog entries, commit messages, and code documentation must be written in English.**
@@ -22,7 +33,7 @@ This repository maintains README files in three languages: English, Chinese, and
 - `README.ru.md` — Russian translation
 - `README.i18n.yaml` — consistency record with content hashes
 
-The `README.i18n.yaml` file contains hashes of each README file. Git hooks automatically verify that translations are in sync before commits and pushes.
+The `README.i18n.yaml` file contains hashes of each README file. Once the git hooks are installed (see [Development Setup](#development-setup)), they verify that translations are in sync before commits and pushes.
 
 ### When you edit a README
 
@@ -44,7 +55,7 @@ npm run verify-translation
 npm run verify-translation -- --write
 ```
 
-The pre-commit hook will automatically check translation consistency. If you see an error, it means the README files have different content. Update all translations and record the sync before committing.
+The pre-commit hook (once installed — see [Development Setup](#development-setup)) will automatically check translation consistency. An error means a README's content no longer matches the hash recorded in `README.i18n.yaml` — i.e. it changed since the last recorded sync. The check is a change detector, not a proof that the languages agree: update all translations together, then record the sync (`--write`) before committing.
 
 ## Release Process
 

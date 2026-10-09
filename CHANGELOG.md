@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.1] - 2026-10-09
+
+### Added
+
+- The failed-refresh state now says what went wrong and when the next automatic attempt is due. The popover shows a sentence naming the fault — unreachable network, timeout, rejected key, rate limit, server error, unexpected reply — the raw detail underneath it, a live countdown to the next attempt, and a **Retry now** button. The chip's tooltip carries the same sentence and countdown, and its accessible name says why the figures are stale. See [ADR 0005](https://github.com/RyabykinIlya/dsh-openrouter-spend/blob/main/docs/adr/0005-surface-a-failed-refresh-and-its-retry-schedule.md) (the ADR log ships with the repository, not the npm package).
+- The host classifies a failed refresh (`describeFailure`) into `errorCode` beside the raw `error`, so the browser names the fault in the reader's language instead of repeating `fetch failed`.
+- A retry ladder: the first attempt after a failure comes 15 seconds later, the second after 30, and then the ordinary `refreshSeconds`. The host announces it as `nextRefreshAt` and the browser polls on that field, so the shorter retry is real rather than a promise a fixed interval ignores. A successful read resets the ladder.
+- `GET /openrouter-spend/summary?force=1` reads past the host's cache for the popover's Retry. Concurrent callers still share one read, and a forced read is floored at two seconds so a held-down button cannot become a stream of upstream queries.
+
+### Changed
+
+- A reply that never arrived is a state the chip shows rather than a silent no-op. A non-OK response — for example the plugin's own route answering 502 — and a client-side network failure both surface the reason, the countdown, and the Retry button; previously the poller kept the old figures and said nothing at all.
+
 ## [0.4.0] - 2026-10-08
 
 ### Added
@@ -14,6 +27,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A Settings switch that enables the limit warning feature. Ships off by default.
 - Frame-wide toast notification on limit escalation (`none` → `warn`, `none` → `critical`, `warn` → `critical`). The toast fires only once per escalation and can be dismissed or clicked to open the popover. Opening the popover or dismissing the toast marks the escalation as seen.
 - Config knobs `warnConsumedFraction`, `criticalConsumedFraction`, and `burnWindowDays` for tuning limit thresholds and the burn rate calculation window.
+- The README now ships in Chinese and Russian (`README.zh.md`, `README.ru.md`) alongside the English one, with a language switcher linking the three versions at the top of each. `CONTRIBUTING.md` documents the contribution workflow and the English-only release policy, and a translation-verification script (`npm run verify-translation`) records the three READMEs' content hashes in `README.i18n.yaml` so an unnoticed edit is caught before commit.
 
 ### Changed
 

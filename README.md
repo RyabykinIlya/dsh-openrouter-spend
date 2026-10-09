@@ -28,8 +28,8 @@
 </p>
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/RyabykinIlya/dsh-openrouter-spend/v0.3.2/docs/popover.png" width="340" alt="Spend popover"><br>
-  <sub>The popover: range and API-key filters, today's spend per model, daily bars, prepaid balance and lifetime spend.</sub>
+  <img src="https://raw.githubusercontent.com/RyabykinIlya/dsh-openrouter-spend/main/docs/popover.png" width="340" alt="Spend popover"><br>
+  <sub>The popover: range and API-key filters, today's spend per model, daily bars, prepaid balance and lifetime spend. The screenshot predates the limit block and the failed-refresh state added in 0.4.0 — the [limit-notice mockup](docs/mockups/limit-notice.html) shows how those look.</sub>
 </p>
 
 - **Chip under the composer** — `session/day`: what this chat spent today over the whole day's spend, for the selected range and API key (today, 7 days, or 30 days).
@@ -37,7 +37,7 @@
 - **Settings → OpenRouter spend** — store or clear the management key, pick the display currency (USD, or RUB at the cbr.ru rate), set the refresh interval, filter by API key.
 - **Limit warning** — off by default. Turn it on in Settings and the popover shows how much of the tracked key's limit is left: the share consumed, how long the remainder lasts at the current pace, and when the cap refills. The chip's dot turns amber and then red as the cap approaches, and a toast fires once when the level escalates.
 
-The host half caches the summary for `refreshSeconds` and coalesces concurrent refreshes, so any number of open tabs cost one OpenRouter query per refresh window. When a refresh fails, the last good figures stay on screen and the reason is shown instead of an empty panel.
+The host half caches the summary for `refreshSeconds` and coalesces concurrent refreshes, so any number of open tabs cost one OpenRouter query per refresh window. When a refresh fails, the last good figures stay on screen and the reason is shown instead of an empty panel: the popover names the fault, counts down to the next automatic attempt (15 seconds after the first failure, then 30, then the ordinary interval), and offers **Retry now** to read again immediately.
 
 ## Requirements
 
@@ -55,7 +55,7 @@ dsh plugin --profile web add dsh-openrouter-spend
 From GitHub (plain JavaScript, no build step and no build-script permission):
 
 ```sh
-dsh plugin --profile web add github:RyabykinIlya/dsh-openrouter-spend#v0.3.2
+dsh plugin --profile web add github:RyabykinIlya/dsh-openrouter-spend#v0.4.1
 ```
 
 Then open Settings → OpenRouter spend and paste the management key.
@@ -78,6 +78,8 @@ Every field can be overridden in the profile's `cordis.patch.yml` row; the schem
 | `burnWindowDays` | `7` | 1–30, integer | Trailing days of hourly burn read for the runway estimate |
 
 Viewing preferences (display currency, per-key filter, refresh interval override, the limit-warning switch) are browser-local (`localStorage`). The limit warning stays off until it is turned on.
+
+`burnWindowDays` reads one row per hour and key. Past 5000 rows the read is refused rather than truncated, so a long window combined with many simultaneously active keys does not mix: the runway estimate reports the refusal and names this setting, and narrowing `burnWindowDays` is the fix.
 
 ## What the numbers are
 

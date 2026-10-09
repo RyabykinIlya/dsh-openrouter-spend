@@ -9,7 +9,7 @@ The repository maintains README files in three languages:
 - `README.zh.md` (Chinese) 
 - `README.ru.md` (Russian)
 
-The `README.i18n.yaml` file tracks content hashes to ensure all translations stay synchronized.
+The `README.i18n.yaml` file tracks content hashes to ensure all translations stay synchronized. It ships in the npm package (it is listed in `package.json`'s `files`) purely as a record: it lets anyone match a packed README against the repository's recorded sync state, and nothing at runtime reads it.
 
 ## Scripts
 
@@ -29,7 +29,7 @@ npm run verify-translation -- --write
 
 ## Git Hooks
 
-Lefthook automatically runs translation verification:
+Lefthook automatically runs translation verification (run `npx lefthook install` once after cloning to install the hooks — the package ships no install-time lifecycle script, so registry consumers never run lefthook):
 - **pre-commit**: Checks if any README*.md files were modified
 - **pre-push**: Verifies all translations before pushing
 

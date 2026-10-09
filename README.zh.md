@@ -27,16 +27,16 @@
 </p>
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/RyabykinIlya/dsh-openrouter-spend/v0.3.2/docs/popover.png" width="340" alt="Spend popover"><br>
-  <sub>弹出窗口：时间范围和 API 密钥过滤器、今日每个模型的支出、每日条形图、预付余额和累计支出。</sub>
+  <img src="https://raw.githubusercontent.com/RyabykinIlya/dsh-openrouter-spend/main/docs/popover.png" width="340" alt="Spend popover"><br>
+  <sub>弹出窗口：时间范围和 API 密钥过滤器、今日每个模型的支出、每日条形图、预付余额和累计支出。截图拍摄于 0.4.0 新增的限额区块和刷新失败状态之前，这两者的样子见[通知设计稿](docs/mockups/limit-notice.html)。</sub>
 </p>
 
-- **编辑器下方的芯片** — `会话/今日`：当前对话今日的支出占全天支出的比例，支持选择时间范围和 API 密钥（今日、7天或30天）。
+- **编辑器下方的芯片** — `会话/今日`：当前对话今日的支出，以及全天的总支出，适用于所选的时间范围和 API 密钥（今日、7天或30天）。
 - **芯片弹出窗口** — 时间范围和 API 密钥过滤器、今日每个模型的支出、时间窗口内的每日条形图、预付余额和累计支出。
 - **设置 → OpenRouter spend** — 存储或清除管理密钥、选择显示货币（美元或按 cbr.ru 汇率的卢布）、设置刷新间隔、按 API 密钥过滤。
 - **限额提醒** — 默认关闭。在设置中开启后，弹出窗口会显示所跟踪密钥的限额还剩多少：已用比例、按当前速度剩余额度还能用多久，以及限额何时重置。随着限额逼近，芯片上的圆点先变黄再变红，级别升级时弹出一次通知。
 
-主机端缓存摘要 `refreshSeconds` 秒并合并并发刷新，因此任意数量的打开标签页在每个刷新窗口内只需查询 OpenRouter 一次。当刷新失败时，最后的有效数据保留在屏幕上，原因显示在空面板的位置。
+主机端缓存摘要 `refreshSeconds` 秒并合并并发刷新，因此任意数量的打开标签页在每个刷新窗口内只需查询 OpenRouter 一次。当刷新失败时，最后的有效数据保留在屏幕上，原因显示在空面板的位置：面板会说明故障原因，倒计时到下次自动尝试（首次失败后 15 秒，之后 30 秒，然后恢复普通间隔），并提供**立即重试**按钮以立刻重新读取。
 
 ## 系统要求
 
@@ -54,7 +54,7 @@ dsh plugin --profile web add dsh-openrouter-spend
 从 GitHub 安装（纯 JavaScript，无构建步骤和构建脚本权限）：
 
 ```sh
-dsh plugin --profile web add github:RyabykinIlya/dsh-openrouter-spend#v0.3.2
+dsh plugin --profile web add github:RyabykinIlya/dsh-openrouter-spend#v0.4.1
 ```
 
 然后打开 Settings → OpenRouter spend 并粘贴管理密钥。
@@ -77,6 +77,8 @@ dsh plugin --profile web add github:RyabykinIlya/dsh-openrouter-spend#v0.3.2
 | `burnWindowDays` | `7` | 1–30，整数 | 为估算剩余时间而读取的小时级消耗天数 |
 
 查看首选项（显示货币、按密钥过滤器、刷新间隔覆盖、限额提醒开关）是浏览器本地的（`localStorage`）。限额提醒在开启前一直关闭。
+
+`burnWindowDays` 每小时、每个密钥读取一行。超过 5000 行时读取会被拒绝，而不是被截断，因此较长的窗口与大量同时活跃的密钥无法并存：剩余时间估算会报告该拒绝并指出此设置，解决办法就是调小 `burnWindowDays`。
 
 ## 数字含义
 
