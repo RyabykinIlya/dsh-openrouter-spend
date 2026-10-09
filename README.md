@@ -35,6 +35,7 @@
 - **Chip under the composer** — `session/day`: what this chat spent today over the whole day's spend, for the selected range and API key (today, 7 days, or 30 days).
 - **Chip popover** — range and API-key filters, today's spend per model, a daily bar chart across the window, prepaid balance and lifetime spend.
 - **Settings → OpenRouter spend** — store or clear the management key, pick the display currency (USD, or RUB at the cbr.ru rate), set the refresh interval, filter by API key.
+- **Limit warning** — off by default. Turn it on in Settings and the popover shows how much of the tracked key's limit is left: the share consumed, how long the remainder lasts at the current pace, and when the cap refills. The chip's dot turns amber and then red as the cap approaches, and a toast fires once when the level escalates.
 
 The host half caches the summary for `refreshSeconds` and coalesces concurrent refreshes, so any number of open tabs cost one OpenRouter query per refresh window. When a refresh fails, the last good figures stay on screen and the reason is shown instead of an empty panel.
 
@@ -72,8 +73,11 @@ Every field can be overridden in the profile's `cordis.patch.yml` row; the schem
 | `cbrUrl` | `https://www.cbr.ru/scripts/XML_daily.asp` | `https://` URL | CBR daily-rates sheet read for the RUB rate |
 | `rateRefreshSeconds` | `3600` | 60–86400, integer | Seconds between cbr.ru rate reads |
 | `timeoutMs` | `15000` | 1000–120000, integer | Per-request deadline against OpenRouter and cbr.ru |
+| `warnConsumedFraction` | `0.4` | 0.05–0.95 | Share of a periodic cap consumed that raises the warning level |
+| `criticalConsumedFraction` | `0.8` | 0.1–1 | Share of a periodic cap consumed that raises the critical level |
+| `burnWindowDays` | `7` | 1–30, integer | Trailing days of hourly burn read for the runway estimate |
 
-Viewing preferences (display currency, per-key filter, refresh interval override) are browser-local (`localStorage`).
+Viewing preferences (display currency, per-key filter, refresh interval override, the limit-warning switch) are browser-local (`localStorage`). The limit warning stays off until it is turned on.
 
 ## What the numbers are
 

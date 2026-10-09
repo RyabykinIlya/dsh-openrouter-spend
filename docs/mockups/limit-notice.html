@@ -1,0 +1,208 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Limit notice mockup</title>
+<style>
+  :root {
+    --bg: #ffffff;
+    --panel: #ffffff;
+    --label-primary: #1a1a1a;
+    --label-secondary: #5c5c5c;
+    --label-tertiary: #8a8a8a;
+    --border-l2: #e3e3e3;
+    --separator: #efefef;
+    --hover: #f2f2f3;
+    --hover-solid: #e8e8ea;
+    --business: #2f6feb;
+    --warn: #c08b00;
+    --error: #d13b3b;
+    --track: #ebebed;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 28px;
+    background: #f6f6f7;
+    font: 13px/1.45 -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+    color: var(--label-primary);
+    display: flex; flex-direction: column; gap: 22px;
+  }
+  h2 { font-size: 12px; font-weight: 500; color: var(--label-tertiary);
+       text-transform: uppercase; letter-spacing: .06em; margin: 0 0 8px; }
+
+  /* ── chip ───────────────────────────────────────────── */
+  .chiprow { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+  .chip {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 3px 10px; border-radius: 999px;
+    background: var(--hover); cursor: pointer;
+    color: var(--label-secondary); font: 12px/1.4 inherit;
+  }
+  .chip-amount { color: var(--label-primary); font-variant-numeric: tabular-nums; }
+  .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--business); flex: none; }
+  .dot[data-state="stale"]   { background: var(--warn); }
+  .dot[data-state="loading"] { background: var(--label-tertiary); }
+  .dot[data-state="error"], .dot[data-state="no-credential"] { background: var(--error); }
+  .dot[data-state="limit-warn"]     { background: var(--warn); }
+  .dot[data-state="limit-critical"] { background: var(--error); }
+
+  @media (prefers-reduced-motion: no-preference) {
+    .dot[data-state="limit-critical"] { animation: ors-pulse 1.6s ease-in-out 3; }
+    .dot[data-state="limit-warn"]     { animation: ors-pulse 1.6s ease-in-out 2; }
+  }
+  @keyframes ors-pulse { 50% { opacity: .25; } }
+
+  /* ── popover ────────────────────────────────────────── */
+  .panel {
+    width: 340px; padding: 12px; border-radius: 12px; text-align: left;
+    background: var(--panel); border: .5px solid var(--border-l2);
+    box-shadow: 0 12px 32px rgba(0,0,0,.18);
+  }
+  .head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+  .label { color: var(--label-tertiary); font: 12px/1.4 inherit; }
+  .figure { font-size: 22px; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .sub { margin-top: 2px; color: var(--label-tertiary); font: 12px/1.4 inherit; }
+  .num { font-variant-numeric: tabular-nums; white-space: nowrap; }
+
+  /* the new block */
+  .quota { margin: 10px 0 8px; padding-top: 9px; border-top: .5px solid var(--separator); }
+  .quota-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+  .quota-key { font: 12px/1.4 inherit; }
+  .quota-pct { font: 12px/1.4 inherit; font-variant-numeric: tabular-nums; color: var(--label-secondary); }
+  .meter {
+    position: relative; height: 5px; border-radius: 999px; margin: 7px 0 6px;
+    background: var(--track); overflow: hidden;
+  }
+  .fill { position: absolute; inset: 0 auto 0 0; border-radius: 999px; background: var(--business); }
+  .quota[data-level="warn"]     .fill { background: var(--warn); }
+  .quota[data-level="critical"] .fill { background: var(--error); }
+  .quota[data-level="warn"]     .quota-pct { color: var(--warn); font-weight: 600; }
+  .quota[data-level="critical"] .quota-pct { color: var(--error); font-weight: 600; }
+  .quota-note { font: 12px/1.4 inherit; color: var(--label-secondary); }
+  .quota[data-level="critical"] .quota-note { color: var(--error); }
+  .quota[data-level="warn"] .quota-note { color: var(--warn); }
+
+  /* unchanged parts, for context */
+  .range { display: flex; gap: 4px; margin: 10px 0 8px; }
+  .range button {
+    padding: 3px 8px; border: 0; border-radius: 6px; background: var(--hover);
+    color: var(--label-secondary); font: 12px/1.4 inherit; cursor: pointer;
+  }
+  .range button[aria-pressed="true"] { background: var(--hover-solid); color: var(--label-primary); }
+  table { width: 100%; border-collapse: collapse; }
+  th { padding: 4px 0; text-align: left; color: var(--label-tertiary); font: 12px/1.4 inherit;
+       font-weight: 400; border-bottom: .5px solid var(--border-l2); }
+  th:last-child, td:last-child { text-align: right; }
+  td { padding: 4px 0; border-bottom: .5px solid var(--separator); }
+  .keyrow { display: flex; flex-wrap: wrap; gap: 4px; margin: 10px 0 8px; }
+  .key { padding: 3px 8px; border-radius: 6px; background: var(--hover); font: 12px/1.4 inherit; }
+  .panels { display: flex; gap: 20px; flex-wrap: wrap; align-items: flex-start; }
+  .pair { display: flex; flex-direction: column; }
+</style>
+</head>
+<body>
+
+<h2>Chip states (composer dock)</h2>
+<div class="chiprow">
+  <span class="chip"><span class="dot" data-state="ok"></span><span class="chip-amount">$0.85/$1.50</span></span>
+  <span class="chip"><span class="dot" data-state="limit-warn"></span><span class="chip-amount">$0.85/$1.50</span></span>
+  <span class="chip"><span class="dot" data-state="limit-critical"></span><span class="chip-amount">$0.85/$1.50</span></span>
+  <span class="chip"><span class="dot" data-state="stale"></span><span class="chip-amount">$0.85/$1.50</span></span>
+</div>
+<div class="sub">ok (unchanged) · limit-warn · limit-critical · stale (unchanged)</div>
+
+<h2>Popover with the limit block</h2>
+<div class="panels">
+
+  <div class="pair">
+    <div class="sub">1 · healthy — 34% of a daily cap used, no alarm</div>
+    <div class="panel">
+      <div class="head"><span class="label">Today</span><span class="figure">$2.15</span></div>
+      <div class="sub">47 requests · Updated 6:14:02 PM</div>
+      <div class="sub">Balance: $18.42 · Lifetime: $96.75</div>
+
+      <div class="quota" data-level="ok">
+        <div class="quota-head">
+          <span class="quota-key label">API key limit · <span style="color:#2f6feb">build-bot</span></span>
+          <span class="quota-pct">34%</span>
+        </div>
+        <div class="meter"><div class="fill" style="width:34%"></div></div>
+        <div class="quota-note">$7.90 of $12 left · resets 03:00</div>
+      </div>
+
+      <div class="range">
+        <button aria-pressed="true">Today</button><button>7 days</button><button>30 days</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="pair">
+    <div class="sub">2 · warn — 40% consumed, ~2 h left at this rate</div>
+    <div class="panel">
+      <div class="head"><span class="label">Today</span><span class="figure">$2.15</span></div>
+      <div class="sub">47 requests · Updated 6:14:02 PM</div>
+      <div class="sub">Balance: $18.42 · Lifetime: $96.75</div>
+
+      <div class="quota" data-level="warn">
+        <div class="quota-head">
+          <span class="quota-key label">API key limit · <span style="color:#2f6feb">build-bot</span></span>
+          <span class="quota-pct">40%</span>
+        </div>
+        <div class="meter"><div class="fill" style="width:40%"></div></div>
+        <div class="quota-note">$7.20 of $12 left · 40% used · resets 03:00 · ~2 h at this rate</div>
+      </div>
+
+      <div class="range">
+        <button aria-pressed="true">Today</button><button>7 days</button><button>30 days</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="pair">
+    <div class="sub">3 · critical — 80% consumed, ~25 min left</div>
+    <div class="panel">
+      <div class="head"><span class="label">Today</span><span class="figure">$2.15</span></div>
+      <div class="sub">47 requests · Updated 6:14:02 PM</div>
+      <div class="sub">Balance: $18.42 · Lifetime: $96.75</div>
+
+      <div class="quota" data-level="critical">
+        <div class="quota-head">
+          <span class="quota-key label">API key limit · <span style="color:#2f6feb">build-bot</span></span>
+          <span class="quota-pct">80%</span>
+        </div>
+        <div class="meter"><div class="fill" style="width:80%"></div></div>
+        <div class="quota-note">$2.40 of $12 left · 80% used · ~25 min at this rate</div>
+      </div>
+
+      <div class="range">
+        <button aria-pressed="true">Today</button><button>7 days</button><button>30 days</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="pair">
+    <div class="sub">4 · lifetime cap (limit_reset: null) — days, not a reset</div>
+    <div class="panel">
+      <div class="head"><span class="label">Today</span><span class="figure">$2.15</span></div>
+      <div class="sub">47 requests · Updated 6:14:02 PM</div>
+      <div class="sub">Balance: $18.42 · Lifetime: $96.75</div>
+
+      <div class="quota" data-level="critical">
+        <div class="quota-head">
+          <span class="quota-key label">API key limit · <span style="color:#c07a3b">batch-key</span></span>
+          <span class="quota-pct">97%</span>
+        </div>
+        <div class="meter"><div class="fill" style="width:97%"></div></div>
+        <div class="quota-note">$0.80 of $25 left · under a day at this rate</div>
+      </div>
+
+      <div class="range">
+        <button aria-pressed="true">Today</button><button>7 days</button><button>30 days</button>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+</body>
+</html>

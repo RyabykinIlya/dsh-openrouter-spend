@@ -6,7 +6,9 @@
  * OpenRouter's own analytics (`total_usage`), so it is billed money rather than
  * a token estimate priced from a local table. The one figure that is not
  * OpenRouter's is the RUB rate, read from the CBR daily sheet so the browser
- * can show the same money in rubles.
+ * can show the same money in rubles. Per-key spend limits come from the
+ * management keys endpoint and the hourly burn behind the "limit is running
+ * out" warning from analytics bucketed by hour; both ride the same summary.
  */
 
 import Schema from 'schemastery'
@@ -37,6 +39,15 @@ const MAX_REPLY_BYTES = 4 * 1024 * 1024
 
 /** Rows beyond this are refused rather than truncated: a partial split misreports cost. */
 const MAX_ANALYTICS_ROWS = 500
+
+/**
+ * The hourly burn window has a different row shape from the daily split above:
+ * one row per hour and key — `burnWindowDays × 24 × keys` — rather than one per
+ * day, key and model. Reusing `MAX_ANALYTICS_ROWS` there refused the window at
+ * three keys burning across the default seven days (504 rows), which is ordinary
+ * traffic rather than a runaway. The reply-size guard still bounds the response.
+ */
+const MAX_BURN_ROWS = 5000
 
 /** The session split is one row per session, not per session and day; the server caps at 1000. */
 const MAX_SESSION_ROWS = 1000
@@ -80,6 +91,12 @@ export const Config = Schema.object({
     .description('Seconds between cbr.ru rate reads; the rate moves at most once a day.'),
   timeoutMs: Schema.number().step(1).min(1000).max(120_000).default(15_000)
     .description('Per-request deadline against the OpenRouter API and cbr.ru, in milliseconds.'),
+  warnConsumedFraction: Schema.number().step(0.01).min(0.05).max(0.95).default(0.4)
+    .description('Share of a key limit consumed that turns the chip into a warning.'),
+  criticalConsumedFraction: Schema.number().step(0.01).min(0.1).max(1).default(0.8)
+    .description('Share of a key limit consumed that turns the chip critical.'),
+  burnWindowDays: Schema.number().step(1).min(1).max(30).default(7)
+    .description('Days of hourly burn the summary carries, today included.'),
 })
 
 /**
@@ -340,6 +357,125 @@ async function queryCredits(config, credential, signal) {
 }
 
 /**
+ * Narrow the `/keys` reply to the limits the browser renders. Only a key that
+ * actually carries a limit is published — a key without one is not a "limit is
+ * running out" candidate — and only the four limit fields travel: the record
+ * itself (hash, label, creator, timestamps, usage counters) stays in the host,
+ * since this repo and its payload are public.
+ * @param keysBody - the parsed `GET {apiBase}/keys` body.
+ * @returns `key name → { limit, limitRemaining, limitReset, disabled }`, one
+ * entry per key whose limit is a finite number above zero.
+ * @throws when `keysBody.data` is not an array: a reply of an unknown shape
+ * must read as "could not read", never as "no limits exist".
+ */
+export function readKeyLimits(keysBody) {
+  const data = keysBody?.data
+  if (!Array.isArray(data)) throw new Error('keys returned no data array')
+  const limits = {}
+  for (const row of data) {
+    if (row === null || typeof row !== 'object') continue
+    const name = row.name
+    if (typeof name !== 'string' || name.length === 0) continue
+    const limit = row.limit
+    if (!Number.isFinite(limit) || limit <= 0) continue
+    const remaining = row.limit_remaining
+    limits[name] = {
+      limit,
+      limitRemaining: Number.isFinite(remaining) ? remaining : limit,
+      limitReset: typeof row.limit_reset === 'string' ? row.limit_reset : null,
+      disabled: row.disabled === true,
+    }
+  }
+  return limits
+}
+
+/** Fetch the account's API keys and narrow them to the per-key limits. */
+async function queryKeys(config, credential, signal) {
+  const url = `${config.apiBase.replace(/\/+$/, '')}/keys`
+  const response = await fetch(url, { headers: { authorization: `Bearer ${credential}` }, signal })
+  if (!response.ok) throw new Error(`keys answered ${response.status}`)
+  const body = await response.json()
+  return readKeyLimits(body)
+}
+
+/**
+ * Read one hourly burn row. Same wire narrowing as `readRow`: the key and the
+ * hour bucket are strings, and `total_usage` arrives as a decimal string.
+ * @returns the row, or `undefined` when it carries no usable key or hour.
+ */
+function readBurnRow(row) {
+  if (row === null || typeof row !== 'object') return undefined
+  const key = row.api_key_id
+  const ts = row.date__hour
+  const usd = Number(row.total_usage)
+  if (typeof key !== 'string' || typeof ts !== 'string') return undefined
+  if (!Number.isFinite(usd)) return undefined
+  return { key, ts, usd }
+}
+
+/**
+ * Bucket hourly analytics rows per key: one list of `{ ts, usd }` points per
+ * key, ascending by hour. Hours nobody spent in stay absent rather than
+ * zero-filled — the browser pads the gaps it cares about.
+ * @param rows - hourly rows as `queryHourlyBurn` reads them.
+ * @returns `key name → [{ ts, usd }]`; rows without a usable key, hour or
+ * cost are skipped silently.
+ */
+export function groupHourlyBurn(rows) {
+  const burn = new Map()
+  for (const row of rows ?? []) {
+    const read = readBurnRow(row)
+    if (read === undefined) continue
+    const buckets = burn.get(read.key) ?? new Map()
+    const bucket = buckets.get(read.ts) ?? { ts: read.ts, usd: 0 }
+    bucket.usd += read.usd
+    buckets.set(read.ts, bucket)
+    burn.set(read.key, buckets)
+  }
+  return Object.fromEntries([...burn.entries()].map(([key, buckets]) => [
+    key,
+    [...buckets.values()].sort((left, right) => (left.ts < right.ts ? -1 : left.ts > right.ts ? 1 : 0)),
+  ]))
+}
+
+/**
+ * Fetch the burn window bucketed by hour and key. The analytics `filter`
+ * parameter is silently ignored by this API, so every narrowing happens in the
+ * request itself and in the host, never in a filter this server would drop.
+ */
+async function queryHourlyBurn(config, credential, start, end, signal) {
+  const url = `${config.apiBase.replace(/\/+$/, '')}/analytics/query`
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: { authorization: `Bearer ${credential}`, 'content-type': 'application/json' },
+    body: JSON.stringify({
+      metrics: ['total_usage'],
+      dimensions: ['api_key_id'],
+      granularity: 'hour',
+      time_range: { start, end },
+      limit: MAX_BURN_ROWS,
+    }),
+    signal,
+  })
+  if (!response.ok) {
+    const detail = (await response.text()).slice(0, 200)
+    throw new Error(`analytics/query (hourly burn) answered ${response.status}: ${detail}`)
+  }
+  const length = Number(response.headers.get('content-length') ?? 0)
+  if (Number.isFinite(length) && length > MAX_REPLY_BYTES) {
+    throw new Error(`analytics/query (hourly burn) reply exceeds ${MAX_REPLY_BYTES} bytes`)
+  }
+  const body = await response.json()
+  const rows = body?.data?.data
+  if (!Array.isArray(rows)) throw new Error('analytics/query (hourly burn) returned no data rows')
+  // A truncated burn sums to less than the keys actually burnt; refuse instead.
+  if (body?.data?.metadata?.truncated === true || rows.length >= MAX_BURN_ROWS) {
+    throw new Error(`analytics/query (hourly burn) hit its ${MAX_BURN_ROWS}-row ceiling; narrow config.burnWindowDays`)
+  }
+  return groupHourlyBurn(rows)
+}
+
+/**
  * Read one numeric tag (`<Value>`, `<Nominal>`) out of a `<Valute>` block.
  * The sheet is windows-1251, but every tag read here is ASCII, so decoding the
  * reply as UTF-8 cannot corrupt a rate; the garbled names are never touched.
@@ -485,12 +621,15 @@ function byModel(rows, today) {
  * split is auxiliary: its failure lands in `sessionsError` and never takes
  * the rest of the summary down with it. A lineage read that fails is contained
  * the same way — the rows keep their own figures and `lineageError` says why —
- * so the chip understates rather than disappearing (ADR-0003).
+ * so the chip understates rather than disappearing (ADR-0003). The per-key
+ * limits and the hourly burn are auxiliary the same way: each lands in its own
+ * `limitsError` / `burnError` and neither failure can take the summary down.
  */
 async function collect(ctx, config, credential, signal, rateInfo) {
   const now = new Date()
   const end = new Date(now.getTime() + 60_000).toISOString()
   const start = startOfUtcDay(now, config.historyDays - 1)
+  const burnStart = startOfUtcDay(now, config.burnWindowDays - 1)
   const sessions = querySessions(config, credential, start, end, signal)
     .then(async windowRows => {
       const todayStart = startOfUtcDay(now, 0)
@@ -505,11 +644,23 @@ async function collect(ctx, config, credential, signal, rateInfo) {
     .catch(error => ({
       sessionsError: error instanceof Error ? error.message : String(error),
     }))
-  const [rows, credits, rate, sessionSplit] = await Promise.all([
+  const limits = queryKeys(config, credential, signal)
+    .then(limitsMap => ({ limits: limitsMap }))
+    .catch(error => ({
+      limitsError: error instanceof Error ? error.message : String(error),
+    }))
+  const burn = queryHourlyBurn(config, credential, burnStart, end, signal)
+    .then(burnMap => ({ burnHourly: burnMap }))
+    .catch(error => ({
+      burnError: error instanceof Error ? error.message : String(error),
+    }))
+  const [rows, credits, rate, sessionSplit, limitsSplit, burnSplit] = await Promise.all([
     queryAnalytics(config, credential, start, end, signal),
     queryCredits(config, credential, signal),
     rateInfo(),
     sessions,
+    limits,
+    burn,
   ])
   const today = utcDay(now)
   const series = dailySeries(rows, config.historyDays, now)
@@ -528,8 +679,18 @@ async function collect(ctx, config, credential, signal, rateInfo) {
     // `rate` is always present: rubles per dollar, or null when cbr.ru failed
     // — then `rateError` carries the reason for the panel to show. The session
     // split is `bySession`, or `sessionsError` when the split could not be read.
+    // The limits are `limits`, or `limitsError` when the keys could not be
+    // read — an empty `limits` with no error means "no key carries a limit",
+    // so the two answers must never be confused. The burn is `burnHourly`, or
+    // `burnError` when the hourly window could not be read.
     ...rate,
     ...sessionSplit,
+    ...limitsSplit,
+    ...burnSplit,
+    // The thresholds are host config but take effect in the browser, so they
+    // ride along rather than being duplicated there. A browser that never sees
+    // them falls back to the ADR-0001 defaults.
+    limitThresholds: { warn: config.warnConsumedFraction, critical: config.criticalConsumedFraction },
     credits,
   }
 }
@@ -586,6 +747,9 @@ function emptyPayload(config) {
     byModel: [],
     byKey: [],
     bySession: [],
+    limits: {},
+    burnHourly: {},
+    limitThresholds: { warn: config.warnConsumedFraction, critical: config.criticalConsumedFraction },
     rate: null,
   }
 }

@@ -5,7 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.4.0] - 2026-10-08
+
+### Added
+
+- Limit warning: a limit block in the popover showing what is left of a tracked key's limit, with the share consumed, an estimate of how long the remainder lasts at the current pace, and the refill moment. The block appears when a key is selected and the limit notice is enabled. See [ADR 0001](https://github.com/RyabykinIlya/dsh-openrouter-spend/blob/main/docs/adr/0001-warn-early-on-cap-consumption.md), [ADR 0002](https://github.com/RyabykinIlya/dsh-openrouter-spend/blob/main/docs/adr/0002-read-per-key-limits-from-the-management-keys-endpoint.md) and [ADR 0004](https://github.com/RyabykinIlya/dsh-openrouter-spend/blob/main/docs/adr/0004-gate-the-limit-warning-behind-a-default-off-setting.md) (the ADR log ships with the repository, not the npm package).
+- Two new chip-dot states (`limit-warn`, `limit-critical`) with a finite pulse animation that respects `prefers-reduced-motion`. The dot colour is doubled by text in the popover so colour is never the sole carrier of the level.
+- A Settings switch that enables the limit warning feature. Ships off by default.
+- Frame-wide toast notification on limit escalation (`none` → `warn`, `none` → `critical`, `warn` → `critical`). The toast fires only once per escalation and can be dismissed or clicked to open the popover. Opening the popover or dismissing the toast marks the escalation as seen.
+- Config knobs `warnConsumedFraction`, `criticalConsumedFraction`, and `burnWindowDays` for tuning limit thresholds and the burn rate calculation window.
 
 ### Changed
 

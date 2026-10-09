@@ -3,3 +3,7 @@ node_modules/
 .DS_Store
 
 .env
+
+# Scratch handoff notes for a session in progress; never ship.
+HANDOFF.local.md
+*.local.md

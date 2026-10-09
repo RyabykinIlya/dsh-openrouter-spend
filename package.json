@@ -1,6 +1,6 @@
 {
   "name": "dsh-openrouter-spend",
-  "version": "0.3.2",
+  "version": "0.4.0",
   "description": "DeepSeek Harness plugin: shows what the OpenRouter account actually charged today — per chat and in total, under the composer and in Settings, split by model and API key.",
   "keywords": [
     "dsh",
@@ -64,7 +64,8 @@
       "platform": "web",
       "inject": [
         "@deepseek-ai/dsh-client-ui-conversation",
-        "@deepseek-ai/dsh-client-ui-settings"
+        "@deepseek-ai/dsh-client-ui-settings",
+        "@deepseek-ai/dsh-client-ui-layout"
       ]
     }
   }

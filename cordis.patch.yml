@@ -5,3 +5,6 @@
         credentialRef: OPENROUTER_MGMT_API_KEY
         refreshSeconds: 60
         historyDays: 30
+        warnConsumedFraction: 0.4
+        criticalConsumedFraction: 0.8
+        burnWindowDays: 7
