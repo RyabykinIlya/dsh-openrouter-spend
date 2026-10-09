@@ -41,7 +41,7 @@ const keyRow = fields => ({
 const burnRow = (key, ts, usd) => ({ api_key_id: key, date__hour: ts, total_usage: usd })
 
 test('readKeyLimits: a key with a null limit and a key with no name are skipped', () => {
-  const limits = readKeyLimits({
+  const { limits } = readKeyLimits({
     data: [
       keyRow({}),
       keyRow({ name: 'batch-key', limit: null, limit_remaining: null }),
@@ -61,7 +61,7 @@ test('readKeyLimits: a key with a null limit and a key with no name are skipped'
 })
 
 test('readKeyLimits: an entry carries exactly the four documented fields', () => {
-  const limits = readKeyLimits({ data: [keyRow({ limit_remaining: 12.5, disabled: true })] })
+  const { limits } = readKeyLimits({ data: [keyRow({ limit_remaining: 12.5, disabled: true })] })
 
   assert.deepEqual(
     Object.keys(limits['build-bot']).sort(),
@@ -85,7 +85,7 @@ test('readKeyLimits: no hash, label or creator_user_id appears anywhere in the m
 })
 
 test('readKeyLimits: a missing or non-finite limit_remaining falls back to the limit', () => {
-  const limits = readKeyLimits({
+  const { limits } = readKeyLimits({
     data: [
       keyRow({ name: 'build-bot', limit: 25, limit_remaining: undefined }),
       keyRow({ name: 'batch-key', limit: 25, limit_remaining: null }),
@@ -109,7 +109,7 @@ test('readKeyLimits: a body whose data is not an array throws instead of reading
 })
 
 test('readKeyLimits: a zero, negative or non-finite limit is skipped', () => {
-  const limits = readKeyLimits({
+  const { limits } = readKeyLimits({
     data: [
       keyRow({ name: 'build-bot', limit: 0 }),
       keyRow({ name: 'batch-key', limit: -12 }),
@@ -124,7 +124,7 @@ test('readKeyLimits: a zero, negative or non-finite limit is skipped', () => {
 })
 
 test('readKeyLimits: limit_reset passes through only as a string and disabled only as a boolean', () => {
-  const limits = readKeyLimits({
+  const { limits } = readKeyLimits({
     data: [
       keyRow({ name: 'build-bot', limit_reset: 'weekly', disabled: true }),
       keyRow({ name: 'batch-key', limit_reset: null, disabled: false }),
@@ -138,6 +138,53 @@ test('readKeyLimits: limit_reset passes through only as a string and disabled on
   assert.equal(limits['batch-key'].limitReset, null)
   assert.equal(limits['nightly'].limitReset, null)
   assert.equal(limits['nightly'].disabled, false)
+})
+
+test('readKeyLimits: duplicated names among limited keys drop every entry and surface a note', () => {
+  const { limits, limitsNote } = readKeyLimits({
+    data: [
+      keyRow({ name: 'build-bot', limit: 25, limit_remaining: 12 }),
+      keyRow({ name: 'build-bot', limit: 40, limit_remaining: 30 }),
+      keyRow({ name: 'batch-key', limit: 10, limit_remaining: 4 }),
+      // a third copy must not resurrect the dropped name
+      keyRow({ name: 'build-bot', limit: 50, limit_remaining: 50 }),
+    ],
+  })
+
+  // last-wins would misjoin analytics spend to an arbitrary one of the pair,
+  // so neither is published and the note says what to do about it
+  assert.deepEqual(Object.keys(limits), ['batch-key'])
+  assert.match(limitsNote, /"build-bot"/)
+  assert.match(limitsNote, /rename/)
+})
+
+test('readKeyLimits: a name shared by a limited and an unlimited key is not a duplicate', () => {
+  // only limited keys are published, so one limited twin keeps the name
+  // unambiguous; the unlimited one was never a join candidate
+  const { limits, limitsNote } = readKeyLimits({
+    data: [
+      keyRow({ name: 'build-bot', limit: 25, limit_remaining: 12 }),
+      keyRow({ name: 'build-bot', limit: null, limit_remaining: null }),
+    ],
+  })
+
+  assert.deepEqual(Object.keys(limits), ['build-bot'])
+  assert.equal(limitsNote, undefined)
+})
+
+test('readKeyLimits: a key literally named __proto__ lands as its own entry', () => {
+  const { limits } = readKeyLimits({
+    data: [
+      keyRow({ name: '__proto__', limit: 25, limit_remaining: 12 }),
+      keyRow({ name: 'build-bot', limit: 10, limit_remaining: 5 }),
+    ],
+  })
+
+  // the entry is an own property, the way groupHourlyBurn's Object.fromEntries
+  // already defines such names — not a write through the prototype accessor
+  assert.deepEqual(Object.keys(limits).sort(), ['__proto__', 'build-bot'])
+  assert.equal(limits['__proto__'].limit, 25)
+  assert.equal(Object.hasOwn(limits, '__proto__'), true)
 })
 
 test('groupHourlyBurn: rows group per key with buckets ascending by ts', () => {

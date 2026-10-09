@@ -53,6 +53,14 @@ const MAX_BURN_ROWS = 5000
 const MAX_SESSION_ROWS = 1000
 
 /**
+ * Ceiling on the `/keys` pagination walk. OpenRouter does not document a page
+ * size for `offset`, so the walk is bounded by accumulated rows rather than
+ * pages; an account with more keys than this is a runaway, and the read is
+ * refused rather than looped.
+ */
+const MAX_KEY_ROWS = 1000
+
+/**
  * How far one row's spend climbs towards its ancestors. Real delegation nests a
  * handful deep — the measured corpus held depths of 1 and 2 — so a longer chain
  * is a corrupt lineage, and the walk stops rather than trusting it.
@@ -69,6 +77,45 @@ const MAX_ROLLUP_ROWS = 5000
 
 /** The CBR sheet is a dozen kilobytes; a larger reply is not a rate sheet. */
 const MAX_RATE_BYTES = 256 * 1024
+
+/**
+ * The errno values undici hides behind a bare `fetch failed`. They are the
+ * difference between "this machine cannot reach OpenRouter" and "OpenRouter
+ * refused us", which are two different sentences in the popover.
+ */
+const NETWORK_CODES = new Set([
+  'ENOTFOUND', 'EAI_AGAIN', 'ECONNREFUSED', 'ECONNRESET', 'ETIMEDOUT',
+  'EHOSTUNREACH', 'ENETUNREACH', 'EPIPE', 'EPROTO', 'UND_ERR_SOCKET',
+  'UND_ERR_CONNECT_TIMEOUT', 'CERT_HAS_EXPIRED', 'DEPTH_ZERO_SELF_SIGNED_CERT',
+  'SELF_SIGNED_CERT_IN_CHAIN', 'UNABLE_TO_VERIFY_LEAF_SIGNATURE',
+])
+
+/**
+ * The retry ladder after a failed refresh. The first attempt is quick because
+ * the ordinary cause is a socket that is not up yet — a harness started before
+ * its VPN or proxy — and a full `refreshSeconds` of waiting would hold the chip
+ * amber for a minute over a transient fault. The ladder then settles back on
+ * the ordinary cadence rather than backing off past it: the figures are what
+ * the user is waiting for, so patience has a ceiling.
+ */
+const RETRY_FIRST_SECONDS = 15
+const RETRY_SECOND_SECONDS = 30
+
+/**
+ * Ceiling on a server-supplied retry hint: a `Retry-After` past an hour is
+ * more likely a misparsed clock or a hostile header than a real cooldown, and
+ * falling back to the contained-retry ladder is safer than obeying it — the
+ * worst case is one more 429, which the failure containment already absorbs.
+ */
+const MAX_RETRY_HINT_SECONDS = 3600
+
+/**
+ * A forced refresh — the popover's Retry — is honoured at most this often.
+ * Concurrent callers already collapse into the one in-flight read; this floor
+ * bounds a scripted caller that waits for each answer before asking again, so
+ * the button cannot become a way to hammer OpenRouter.
+ */
+const FORCE_FLOOR_MS = 2000
 
 /**
  * The row's `config` schema: validated by the Loader before `apply`, so a
@@ -96,8 +143,148 @@ export const Config = Schema.object({
   criticalConsumedFraction: Schema.number().step(0.01).min(0.1).max(1).default(0.8)
     .description('Share of a key limit consumed that turns the chip critical.'),
   burnWindowDays: Schema.number().step(1).min(1).max(30).default(7)
-    .description('Days of hourly burn the summary carries, today included.'),
+    .description('Days of hourly burn the summary carries, today included. '
+      + 'The window holds one row per hour and key; past 5000 rows the read is '
+      + 'refused rather than truncated, so a long window and many simultaneously '
+      + 'active keys do not mix — narrow this value when the refusal names it.'),
 })
+
+/**
+ * Classify a failed refresh so the browser can say what went wrong in its own
+ * words instead of repeating the wire's. The raw message still travels as
+ * `error`; this only picks which sentence fits, because "fetch failed" and
+ * "answered 401" are the same string to a reader and different problems to fix.
+ * @returns `{ code, detail }` with `code` one of `network`, `timeout`, `auth`,
+ * `rate-limit`, `server`, `request`, `data`, or `unknown`.
+ */
+export function describeFailure(error) {
+  const detail = error instanceof Error ? error.message : String(error)
+  const name = error instanceof Error ? error.name : ''
+  // `AbortSignal.timeout` rejects with a TimeoutError; an abort of our own keeps AbortError.
+  if (name === 'TimeoutError' || name === 'AbortError') return { code: 'timeout', detail }
+  const cause = error instanceof Error ? error.cause : undefined
+  const causeCode = cause !== null && typeof cause === 'object' && typeof cause.code === 'string'
+    ? cause.code
+    : ''
+  if (NETWORK_CODES.has(causeCode)) return { code: 'network', detail }
+  // Our own status throws read `analytics/query answered 401: ...`.
+  const answered = /answered (\d{3})/.exec(detail)
+  if (answered !== null) {
+    const status = Number(answered[1])
+    if (status === 401 || status === 403) return { code: 'auth', detail }
+    if (status === 429) return { code: 'rate-limit', detail }
+    if (status >= 500) return { code: 'server', detail }
+    return { code: 'request', detail }
+  }
+  // A cause-less undici rejection is still a socket that never opened.
+  if (/fetch failed|ENOTFOUND|ECONNREFUSED|ECONNRESET|EAI_AGAIN|socket hang up|other side closed/i.test(detail)) {
+    return { code: 'network', detail }
+  }
+  // A reply that arrived but did not carry the shape we read.
+  if (/no data rows|no rows|no total_credits|no data array|exceeds|ceiling|truncated/i.test(detail)) {
+    return { code: 'data', detail }
+  }
+  return { code: 'unknown', detail }
+}
+
+/**
+ * Seconds until the next attempt after `failures` consecutive failed refreshes.
+ * The ladder is quick once and then settles on the ordinary cadence; it never
+ * exceeds `refreshSeconds`, so a deliberately short interval is not stretched
+ * by the retry schedule. A server that said when it will accept us again
+ * (`hintSeconds`, parsed off a 429's headers) overrides the ladder upwards:
+ * an earlier retry is just another 429, so the hint may legitimately stretch
+ * past `refreshSeconds`, bounded only by `MAX_RETRY_HINT_SECONDS`.
+ */
+export function retryDelaySeconds(failures, refreshSeconds, hintSeconds = 0) {
+  const step = failures <= 1 ? RETRY_FIRST_SECONDS
+    : failures === 2 ? RETRY_SECOND_SECONDS
+    : refreshSeconds
+  const ladder = Math.min(step, refreshSeconds)
+  const hint = Number.isFinite(hintSeconds)
+    ? Math.min(MAX_RETRY_HINT_SECONDS, Math.ceil(Math.max(0, hintSeconds)))
+    : 0
+  return Math.max(ladder, hint)
+}
+
+/**
+ * The retry delay the server itself asked for, read off a 429 reply's
+ * headers: `Retry-After` (delay-seconds or an HTTP-date) and
+ * `X-RateLimit-Reset` (a unix epoch — seconds, though some deployments send
+ * milliseconds). Both are read when both are present and the later one wins.
+ * Pure, so the parsing is pinnable without a live rate limit.
+ * @param headers - a `Headers`-like object with a `get(name)` method.
+ * @param nowMs - the clock the date- and epoch-shaped hints are measured
+ * against.
+ * @returns whole seconds until the server will accept us again, `0` when no
+ * header carried a usable hint or the hint is already in the past.
+ */
+export function retryHintSeconds(headers, nowMs = Date.now()) {
+  const delays = []
+  const retryAfter = headers?.get('retry-after')
+  if (retryAfter != null) {
+    if (/^\d+(?:\.\d+)?$/.test(retryAfter)) delays.push(Number(retryAfter))
+    else {
+      const at = Date.parse(retryAfter)
+      if (Number.isFinite(at)) delays.push((at - nowMs) / 1000)
+    }
+  }
+  const reset = headers?.get('x-ratelimit-reset')
+  if (reset != null && /^\d+$/.test(reset)) {
+    // A unix epoch, in seconds — though values past ~1e12 can only be
+    // milliseconds, so both spellings are normalised before the subtraction.
+    const epoch = Number(reset)
+    const epochMs = epoch > 1e12 ? epoch : epoch * 1000
+    delays.push((epochMs - nowMs) / 1000)
+  }
+  const hint = Math.max(0, ...delays)
+  return Math.min(MAX_RETRY_HINT_SECONDS, Math.ceil(hint))
+}
+
+/**
+ * Whether a request is answered from the cache instead of reading again. A
+ * plain poll is answered while the entry is fresh; a forced one only inside
+ * `floorMs` of the last attempt, which is what keeps a held-down Retry from
+ * becoming a stream of upstream queries.
+ * @returns true when the cached payload must be served.
+ */
+export function serveFromCache({ cached, now, force, lastAttemptMs, floorMs }) {
+  if (cached === undefined) return false
+  if (!force) return now < cached.expiresAt
+  return now - lastAttemptMs < floorMs
+}
+
+/**
+ * The next cache entry after one completed read: how many failures it leaves
+ * behind, when it stops standing in for a read, and the payload with that
+ * schedule stamped on it. Pure, so the ladder, the announced `nextRefreshAt`,
+ * and the "a good read resets the ladder" rule are testable without a server.
+ *
+ * `nextRefreshAt` is the field the browser polls on: a fixed interval would
+ * make the shorter retry after a failure a promise the poll ignores.
+ */
+export function scheduleRefresh(payload, failures, config, now) {
+  // `error` is defensive: `summary()` only answers ok/stale/no-credential and
+  // the routes send `error` straight to the wire, uncached — but should a
+  // future caller schedule one anyway, it must climb the ladder rather than
+  // stand as a good read.
+  const failed = payload.status === 'stale' || payload.status === 'error'
+  const nextFailures = failed ? failures + 1 : 0
+  // A 429 that said when it will accept us again carries its hint on the
+  // stale payload; the scheduler takes max(ladder, hint) when stamping the
+  // next attempt.
+  const hint = failed ? Math.max(0, Number(payload.retryAfterSeconds) || 0) : 0
+  const ttlMs = (failed ? retryDelaySeconds(nextFailures, config.refreshSeconds, hint) : config.refreshSeconds) * 1000
+  return {
+    failures: nextFailures,
+    expiresAt: now + ttlMs,
+    payload: {
+      ...payload,
+      lastAttemptAt: new Date(now).toISOString(),
+      nextRefreshAt: new Date(now + ttlMs).toISOString(),
+    },
+  }
+}
 
 /**
  * Read one analytics row. `request_count` arrives as a decimal string and the
@@ -116,6 +303,21 @@ function readRow(row) {
   return { day, key, model, usd, requests }
 }
 
+/**
+ * The error every refused upstream reply throws: the status plus a short
+ * slice of the body, so a 403 "Only management keys can perform this
+ * operation" reaches the reader as a sentence rather than a bare number. A
+ * reply that said when it will accept us again also carries its retry hint,
+ * for the scheduler to honour (m2).
+ */
+async function upstreamError(what, response) {
+  const detail = (await response.text()).slice(0, 200)
+  const error = new Error(`${what} answered ${response.status}: ${detail}`)
+  const hint = retryHintSeconds(response.headers)
+  if (hint > 0) error.retryAfterSeconds = hint
+  return error
+}
+
 /** Fetch the window split by API key and model; one query answers both views. */
 async function queryAnalytics(config, credential, start, end, signal) {
   const url = `${config.apiBase.replace(/\/+$/, '')}/analytics/query`
@@ -131,10 +333,7 @@ async function queryAnalytics(config, credential, start, end, signal) {
     }),
     signal,
   })
-  if (!response.ok) {
-    const detail = (await response.text()).slice(0, 200)
-    throw new Error(`analytics/query answered ${response.status}: ${detail}`)
-  }
+  if (!response.ok) throw await upstreamError('analytics/query', response)
   const length = Number(response.headers.get('content-length') ?? 0)
   if (Number.isFinite(length) && length > MAX_REPLY_BYTES) {
     throw new Error(`analytics/query reply exceeds ${MAX_REPLY_BYTES} bytes`)
@@ -184,10 +383,7 @@ async function querySessions(config, credential, start, end, signal) {
     }),
     signal,
   })
-  if (!response.ok) {
-    const detail = (await response.text()).slice(0, 200)
-    throw new Error(`analytics/query (sessions) answered ${response.status}: ${detail}`)
-  }
+  if (!response.ok) throw await upstreamError('analytics/query (sessions)', response)
   const length = Number(response.headers.get('content-length') ?? 0)
   if (Number.isFinite(length) && length > MAX_REPLY_BYTES) {
     throw new Error(`analytics/query (sessions) reply exceeds ${MAX_REPLY_BYTES} bytes`)
@@ -254,6 +450,14 @@ export function delegationEdges(records) {
  * headers, narrowed to the delegation edges the rollup needs. A delegated
  * subagent runs as its own session, so this is the only place the parent link
  * exists (ADR-0003).
+ *
+ * The listing walks the whole logical corpus, and that is a documented
+ * acceptance rather than an oversight: `ctx.sessionQuery` offers no corpus
+ * version to key a cache on, the edges change the moment a subagent is
+ * delegated (a cached map would fold a fresh subagent's spend one refresh
+ * late), and the listing is the session-query service's own lightweight
+ * path — headers and availability flags only, no log replay. It runs once
+ * per refresh, not once per query; revisit only if refresh latency says so.
  * @returns `parent id → child ids` for delegated children.
  */
 async function queryLineage(ctx, signal) {
@@ -347,7 +551,11 @@ export async function rollupWithLineage(merged, readLineage, onError) {
 async function queryCredits(config, credential, signal) {
   const url = `${config.apiBase.replace(/\/+$/, '')}/credits`
   const response = await fetch(url, { headers: { authorization: `Bearer ${credential}` }, signal })
-  if (!response.ok) throw new Error(`credits answered ${response.status}`)
+  if (!response.ok) throw await upstreamError('credits', response)
+  const length = Number(response.headers.get('content-length') ?? 0)
+  if (Number.isFinite(length) && length > MAX_REPLY_BYTES) {
+    throw new Error(`credits reply exceeds ${MAX_REPLY_BYTES} bytes`)
+  }
   const body = await response.json()
   const data = body?.data
   if (typeof data?.total_credits !== 'number' || typeof data?.total_usage !== 'number') {
@@ -362,22 +570,49 @@ async function queryCredits(config, credential, signal) {
  * running out" candidate — and only the four limit fields travel: the record
  * itself (hash, label, creator, timestamps, usage counters) stays in the host,
  * since this repo and its payload are public.
+ *
+ * Two keys cannot share a published name: the analytics split identifies a
+ * key by name alone, so which of two same-named keys a spend row belongs to
+ * is undecidable, and last-wins would misjoin figures to an arbitrary one of
+ * them (ADR-0002 names duplication as the join's known risk). A duplicated
+ * name drops every entry carrying it and surfaces `limitsNote` instead, so
+ * the browser can hang its "limit unknown" path on the reason rather than
+ * show a joined figure that looks authoritative. A name shared by a limited
+ * and an unlimited key is not a duplicate: only one of them is ever
+ * published, so the name stays unambiguous.
  * @param keysBody - the parsed `GET {apiBase}/keys` body.
- * @returns `key name → { limit, limitRemaining, limitReset, disabled }`, one
- * entry per key whose limit is a finite number above zero.
+ * @returns `{ limits, limitsNote }`: `limits` maps `key name →
+ * { limit, limitRemaining, limitReset, disabled }`, one entry per key whose
+ * limit is a finite number above zero and whose name is unique among those;
+ * `limitsNote` is `undefined` unless a duplicated name was dropped.
  * @throws when `keysBody.data` is not an array: a reply of an unknown shape
  * must read as "could not read", never as "no limits exist".
  */
 export function readKeyLimits(keysBody) {
   const data = keysBody?.data
   if (!Array.isArray(data)) throw new Error('keys returned no data array')
-  const limits = {}
+  // `Object.create(null)`: key names are user-chosen labels, and a key
+  // literally named `__proto__` must land as a plain own entry — the burn
+  // map's `Object.fromEntries` already defines such names as own properties,
+  // so the two maps agree on the corner.
+  const limits = Object.create(null)
+  const seenNames = new Set()
+  const duplicated = new Set()
   for (const row of data) {
     if (row === null || typeof row !== 'object') continue
     const name = row.name
     if (typeof name !== 'string' || name.length === 0) continue
     const limit = row.limit
     if (!Number.isFinite(limit) || limit <= 0) continue
+    if (seenNames.has(name)) {
+      // The second (and any later) limited key of this name: drop the entry
+      // the first one wrote and remember the name for the note. A later copy
+      // cannot resurrect it — the name stays in `seenNames`.
+      duplicated.add(name)
+      delete limits[name]
+      continue
+    }
+    seenNames.add(name)
     const remaining = row.limit_remaining
     limits[name] = {
       limit,
@@ -386,16 +621,69 @@ export function readKeyLimits(keysBody) {
       disabled: row.disabled === true,
     }
   }
-  return limits
+  const limitsNote = duplicated.size === 0 ? undefined
+    : `keys named ${[...duplicated].sort().map(name => `"${name}"`).join(', ')} carry limits but share a name; `
+      + 'spend joins keys by name, so all of them were dropped — rename all but one in OpenRouter to see its limit'
+  return { limits, limitsNote }
 }
 
-/** Fetch the account's API keys and narrow them to the per-key limits. */
+/**
+ * Fetch the account's API keys and narrow them to the per-key limits.
+ *
+ * The request states its scope rather than riding the endpoint's defaults,
+ * which exclude exactly the keys a limit warning is about. `include_disabled`
+ * is set because a disabled key still owns its cap and must not read as
+ * "limit unknown" while it still shows spend — the user disabled spending,
+ * not the limit. Expired keys stay excluded on purpose: an expired key cannot
+ * spend, so its cap can never run out, and its frozen remaining/reset figures
+ * would read as live data. `offset` paginates with an undocumented page size,
+ * so the walk requests the next page until one comes back empty; a page that
+ * adds no unseen key means the reply ignores `offset` and already carried
+ * everything, and the row ceiling turns a pathological walk into a refusal
+ * rather than a loop. Only the default workspace's keys are listed —
+ * iterating workspaces would need a workspace listing plus one read per
+ * workspace on every refresh — so a key outside it surfaces as "limit
+ * unknown", the honest answer rather than a missing one.
+ */
 async function queryKeys(config, credential, signal) {
-  const url = `${config.apiBase.replace(/\/+$/, '')}/keys`
-  const response = await fetch(url, { headers: { authorization: `Bearer ${credential}` }, signal })
-  if (!response.ok) throw new Error(`keys answered ${response.status}`)
-  const body = await response.json()
-  return readKeyLimits(body)
+  const base = `${config.apiBase.replace(/\/+$/, '')}/keys`
+  const rows = []
+  const seenHashes = new Set()
+  let offset = 0
+  while (true) {
+    const response = await fetch(`${base}?include_disabled=true&offset=${offset}`, {
+      headers: { authorization: `Bearer ${credential}` },
+      signal,
+    })
+    if (!response.ok) throw await upstreamError('keys', response)
+    const length = Number(response.headers.get('content-length') ?? 0)
+    if (Number.isFinite(length) && length > MAX_REPLY_BYTES) {
+      throw new Error(`keys reply exceeds ${MAX_REPLY_BYTES} bytes`)
+    }
+    const body = await response.json()
+    const page = body?.data
+    if (!Array.isArray(page)) throw new Error('keys returned no data array')
+    if (page.length === 0) break
+    let fresh = 0
+    for (const row of page) {
+      // `hash` is the key's unique id; a repeat means the reply re-sent a row
+      // this walk already has, which is how an `offset`-ignoring reply is
+      // recognised as complete rather than paginated.
+      const hash = row?.hash
+      if (typeof hash === 'string' && hash.length > 0) {
+        if (seenHashes.has(hash)) continue
+        seenHashes.add(hash)
+      }
+      rows.push(row)
+      fresh += 1
+    }
+    if (fresh === 0) break
+    offset += page.length
+    if (rows.length >= MAX_KEY_ROWS) {
+      throw new Error(`keys listing grew to ${rows.length} rows, past the ${MAX_KEY_ROWS}-row ceiling; the pagination walk refused rather than loop`)
+    }
+  }
+  return readKeyLimits({ data: rows })
 }
 
 /**
@@ -457,10 +745,7 @@ async function queryHourlyBurn(config, credential, start, end, signal) {
     }),
     signal,
   })
-  if (!response.ok) {
-    const detail = (await response.text()).slice(0, 200)
-    throw new Error(`analytics/query (hourly burn) answered ${response.status}: ${detail}`)
-  }
+  if (!response.ok) throw await upstreamError('analytics/query (hourly burn)', response)
   const length = Number(response.headers.get('content-length') ?? 0)
   if (Number.isFinite(length) && length > MAX_REPLY_BYTES) {
     throw new Error(`analytics/query (hourly burn) reply exceeds ${MAX_REPLY_BYTES} bytes`)
@@ -625,38 +910,47 @@ function byModel(rows, today) {
  * limits and the hourly burn are auxiliary the same way: each lands in its own
  * `limitsError` / `burnError` and neither failure can take the summary down.
  */
-async function collect(ctx, config, credential, signal, rateInfo) {
+async function collect(ctx, config, credential, rateInfo) {
   const now = new Date()
   const end = new Date(now.getTime() + 60_000).toISOString()
   const start = startOfUtcDay(now, config.historyDays - 1)
   const burnStart = startOfUtcDay(now, config.burnWindowDays - 1)
-  const sessions = querySessions(config, credential, start, end, signal)
+  // One deadline per upstream request, not one for the whole refresh: the
+  // schema documents a per-request timeout, and a shared signal lets a slow
+  // auxiliary read abort the primary analytics query mid-flight and flip the
+  // whole summary stale over a query the chip does not even show. The queries
+  // run concurrently, so the refresh as a whole still answers in about one
+  // deadline rather than the sum of seven.
+  const deadline = () => AbortSignal.timeout(config.timeoutMs)
+  const sessions = querySessions(config, credential, start, end, deadline())
     .then(async windowRows => {
       const todayStart = startOfUtcDay(now, 0)
-      const todayRows = await querySessions(config, credential, todayStart, end, signal)
+      const todayRows = await querySessions(config, credential, todayStart, end, deadline())
       const merged = mergeSessions(windowRows, todayRows)
       return rollupWithLineage(
         merged,
-        () => queryLineage(ctx, signal),
+        () => queryLineage(ctx, deadline()),
         error => ctx.logger.warn('openrouter-spend: session lineage unavailable', error),
       )
     })
     .catch(error => ({
       sessionsError: error instanceof Error ? error.message : String(error),
     }))
-  const limits = queryKeys(config, credential, signal)
-    .then(limitsMap => ({ limits: limitsMap }))
+  const limits = queryKeys(config, credential, deadline())
+    // `limitsNote` rides only when duplicated key names were dropped, so its
+    // absence keeps meaning "every limited key is published".
+    .then(({ limits, limitsNote }) => (limitsNote === undefined ? { limits } : { limits, limitsNote }))
     .catch(error => ({
       limitsError: error instanceof Error ? error.message : String(error),
     }))
-  const burn = queryHourlyBurn(config, credential, burnStart, end, signal)
+  const burn = queryHourlyBurn(config, credential, burnStart, end, deadline())
     .then(burnMap => ({ burnHourly: burnMap }))
     .catch(error => ({
       burnError: error instanceof Error ? error.message : String(error),
     }))
   const [rows, credits, rate, sessionSplit, limitsSplit, burnSplit] = await Promise.all([
-    queryAnalytics(config, credential, start, end, signal),
-    queryCredits(config, credential, signal),
+    queryAnalytics(config, credential, start, end, deadline()),
+    queryCredits(config, credential, deadline()),
     rateInfo(),
     sessions,
     limits,
@@ -681,8 +975,9 @@ async function collect(ctx, config, credential, signal, rateInfo) {
     // split is `bySession`, or `sessionsError` when the split could not be read.
     // The limits are `limits`, or `limitsError` when the keys could not be
     // read — an empty `limits` with no error means "no key carries a limit",
-    // so the two answers must never be confused. The burn is `burnHourly`, or
-    // `burnError` when the hourly window could not be read.
+    // so the two answers must never be confused. `limitsNote` appears only
+    // when duplicated key names were dropped from `limits`. The burn is
+    // `burnHourly`, or `burnError` when the hourly window could not be read.
     ...rate,
     ...sessionSplit,
     ...limitsSplit,
@@ -759,10 +1054,30 @@ function emptyPayload(config) {
  * refresh serves every concurrent caller, so several open tabs cost one poll.
  */
 export function apply(ctx, config) {
+  // The schema cannot cross-validate two fields against each other, so the
+  // warn/critical ordering is refused here, at activation, with the reason —
+  // the same "fail the row rather than misreport later" rule the field
+  // schemas follow. warn >= critical makes the warning tier unreachable and
+  // the chip would jump straight to critical.
+  if (config.warnConsumedFraction >= config.criticalConsumedFraction) {
+    throw new Error(
+      `warnConsumedFraction (${config.warnConsumedFraction}) must be below `
+      + `criticalConsumedFraction (${config.criticalConsumedFraction}): at or above it the warning tier is unreachable`,
+    )
+  }
   let cached = undefined
   let inFlight = undefined
+  // Bumped on every credential write: a read that started before the bump is
+  // stale on arrival, whatever it managed to fetch. `inFlightGeneration` is
+  // the generation the current in-flight read started under.
+  let generation = 0
+  let inFlightGeneration = -1
   let rateCached = undefined
   let rateInFlight = undefined
+  // The retry ladder's state: how many refreshes have failed in a row, and when
+  // the last attempt started. A good read resets both.
+  let failures = 0
+  let lastAttemptMs = 0
 
   /**
    * The RUB rate, on its own clock: the CBR sheet moves at most once a day, so
@@ -812,36 +1127,79 @@ export function apply(ctx, config) {
     if (resolved === undefined) {
       return { ...emptyPayload(config), status: 'no-credential', credential }
     }
-    const signal = AbortSignal.timeout(config.timeoutMs)
     try {
-      return { ...(await collect(ctx, config, resolved.value, signal, rateInfo)), credential }
+      return { ...(await collect(ctx, config, resolved.value, rateInfo)), credential }
     } catch (error) {
       // A stale reply beats an empty panel: keep the last good figures and say why.
       const reason = error instanceof Error ? error.message : String(error)
       ctx.logger.warn('openrouter-spend: refresh failed', reason)
+      // A 429 that said when it will accept us again carries its hint on the
+      // payload; `scheduleRefresh` takes max(ladder, hint) when stamping the
+      // next attempt (m2).
+      const hint = error instanceof Error && Number.isFinite(error.retryAfterSeconds)
+        ? Math.max(0, error.retryAfterSeconds)
+        : 0
       return {
-        ...(cached ?? emptyPayload(config)),
+        ...(cached?.payload ?? emptyPayload(config)),
         status: 'stale',
         error: reason,
+        errorCode: describeFailure(error).code,
+        retryAfterSeconds: hint,
         credential,
       }
     }
   }
 
-  const current = () => {
-    const fresh = cached !== undefined && Date.now() - cached.fetchedAt < config.refreshSeconds * 1000
-    if (fresh) return Promise.resolve(cached.payload)
-    if (inFlight !== undefined) return inFlight
-    inFlight = (async () => {
+  /**
+   * The current summary, from cache while it is still good. `force` skips the
+   * freshness check — the popover's Retry asks for figures now — but still joins
+   * an in-flight read and honours `FORCE_FLOOR_MS`, so it is an override of the
+   * cache and not of the coalescing.
+   *
+   * Every completed read announces its own schedule: `refreshSeconds` ahead
+   * after a good one, and the retry ladder after a failure. The browser follows
+   * that field rather than a fixed interval, which is what makes the shorter
+   * retry real and visible instead of a promise the poll ignores.
+   */
+  const current = (force = false) => {
+    const at = Date.now()
+    // A read still running under a superseded credential is not joinable: it
+    // will answer with the old key's figures, and joining it is exactly how a
+    // credential write used to serve — and cache — the pre-write payload
+    // (M4). It is treated as absent: the cache can still answer, a new read
+    // can start alongside it, and the old read's own caller keeps its answer,
+    // but it never reaches the cache or the ladder.
+    const joinable = inFlight !== undefined && inFlightGeneration === generation
+    if (!joinable
+      && serveFromCache({ cached, now: at, force, lastAttemptMs, floorMs: FORCE_FLOOR_MS })) {
+      return Promise.resolve(cached.payload)
+    }
+    if (joinable) return inFlight
+    const readGeneration = generation
+    const read = (async () => {
+      lastAttemptMs = Date.now()
       try {
-        const payload = await summary()
-        cached = { fetchedAt: Date.now(), payload }
-        return payload
+        const entry = scheduleRefresh(await summary(), failures, config, Date.now())
+        if (generation !== readGeneration) return entry.payload
+        failures = entry.failures
+        cached = { expiresAt: entry.expiresAt, payload: entry.payload }
+        return cached.payload
+      } catch (error) {
+        // A read that never produced a payload still counts towards the ladder,
+        // so a route that keeps throwing does not retry at full speed forever —
+        // unless the credential was replaced meanwhile, when the failure says
+        // nothing about the key the next read will use.
+        if (generation === readGeneration) failures += 1
+        throw error
       } finally {
-        inFlight = undefined
+        // Only the slot's current occupant clears it: a superseded read
+        // finishing late must not unset a newer read's registration.
+        if (inFlight === read) inFlight = undefined
       }
     })()
-    return inFlight
+    inFlight = read
+    inFlightGeneration = readGeneration
+    return read
   }
 
   ctx.effect(() => ctx.webServer.register({
@@ -861,7 +1219,10 @@ export function apply(ctx, config) {
         return
       }
       try {
-        sendJson(res, 200, await current())
+        // `?force=1` is the popover's Retry: answer with a fresh read, not the
+        // cached one. The cache itself is still what a plain poll gets.
+        const url = new URL(req.url ?? '/', 'http://localhost')
+        sendJson(res, 200, await current(url.searchParams.get('force') === '1'))
       } catch (error) {
         ctx.logger.warn('openrouter-spend: summary failed', error)
         sendJson(res, 502, { status: 'error', error: error instanceof Error ? error.message : String(error) })
@@ -901,7 +1262,23 @@ export function apply(ctx, config) {
         return
       }
       cached = undefined
-      sendJson(res, 200, await current())
+      // A stored key is a new reason to read: the ladder starts over rather
+      // than making the first poll after the write wait out an earlier
+      // failure. The generation bump also retires any read still in flight —
+      // it started under the old key, and both joining it and letting it
+      // complete into the cache would answer this reply and the next polls
+      // with the pre-write figures (M4).
+      generation += 1
+      failures = 0
+      lastAttemptMs = 0
+      try {
+        sendJson(res, 200, await current())
+      } catch (error) {
+        // Mirrors the GET route: a read that cannot even start answers the
+        // wire's JSON 502, not a bare 400 from the host (m6).
+        ctx.logger.warn('openrouter-spend: summary failed', error)
+        sendJson(res, 502, { status: 'error', error: error instanceof Error ? error.message : String(error) })
+      }
     },
   }), `openrouter-spend: POST ${CREDENTIAL_PATH}`)
 
