@@ -407,6 +407,55 @@ test('an imminent reset speaks in minutes, and a far one in clock time', () => {
   assert.ok(!/midnight/i.test(middayLine), middayLine);
 });
 
+test('the shipped Russian forms all carry the numeral, and select correctly', () => {
+  // The tests above drive the plural MECHANISM through a local dictionary. This
+  // one reads the dictionary that actually ships: a mutation check showed that
+  // restoring the old numeral-dropping ru strings left every mechanism test
+  // green, so nothing here was pinning the shipped copy. The gap mattered: the
+  // old strings silently discarded the count the other two languages show.
+  const ru = source.slice(source.indexOf('\n          ru: {'), source.indexOf('\n          ru: {') + 4000);
+  const en = source.slice(source.indexOf('\n          en: {'), source.indexOf('\n          zh: {'));
+  const grab = (block, key) => {
+    const match = block.match(new RegExp(`^\\s+${key}: '((?:[^'\\\\]|\\\\.)*)',`, 'm'));
+    return match === null ? undefined : match[1];
+  };
+
+  // Both counted keys must interpolate their numeral in Russian. `{count}` and
+  // `{days}` are what a dropped numeral loses; a string without it cannot show
+  // the figure at all, whatever the plural form.
+  assert.ok(grab(ru, 'limitApproxRequests').includes('{count}'), 'ru must show the request count');
+  assert.ok(grab(ru, 'limitDaysAtRate').includes('{days}'), 'ru must show the day count');
+  // And the suffix forms must carry it too, or `tPlural` would swap in a string
+  // that drops the very numeral it was selected to decline.
+  for (const key of ['limitApproxRequests_one', 'limitApproxRequests_few']) {
+    assert.ok(grab(ru, key).includes('{count}'), `${key} must show the request count`);
+  }
+  for (const key of ['limitDaysAtRate_one', 'limitDaysAtRate_few']) {
+    assert.ok(grab(ru, key).includes('{days}'), `${key} must show the day count`);
+  }
+  // English gained a singular form; Chinese has only the `other` category and
+  // deliberately ships no suffix keys.
+  assert.ok(grab(en, 'limitApproxRequests_one').includes('{count}'));
+  assert.ok(grab(en, 'limitDaysAtRate_one').includes('{days}'));
+  assert.equal(grab(source.slice(source.indexOf('\n          zh: {'), source.indexOf('\n          ru: {')), 'limitApproxRequests_one'), undefined);
+
+  // End to end with the SHIPPED Russian strings and the real selector, not a
+  // fixture: 1 request must take the one form, 5 the many form.
+  const t = (key, params) => {
+    const template = grab(ru, key) ?? key;
+    return params ? template.replace(/\{(\w+)\}/g, (m, n) => (n in params ? String(params[n]) : m)) : template;
+  };
+  const atRest = wanted => limitState({
+    limit: 25, limitRemaining: wanted * 0.02, limitReset: null,
+    burn: burnFor(NOW, 0.002, 5), nowMs: NOW, avgRequestUsd: 0.02,
+  });
+  const oneLine = limitSentence(atRest(1), { fmt: v => `$${v.toFixed(2)}` }, t, 'ru');
+  assert.ok(oneLine.includes('1 запрос'), oneLine);
+  assert.ok(!oneLine.includes('1 запросов'), `the shipped many form must not take 1: ${oneLine}`);
+  const fiveLine = limitSentence(atRest(5), { fmt: v => `$${v.toFixed(2)}` }, t, 'ru');
+  assert.ok(fiveLine.includes('5 запросов'), fiveLine);
+});
+
 test('the dictionary carries every limit key in all three languages', () => {
   // The host half reads the same list, and the browser half must not ship a key
   // that resolves to itself in one language and a sentence in another.

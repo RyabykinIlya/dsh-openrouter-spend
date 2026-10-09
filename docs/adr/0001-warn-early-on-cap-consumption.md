@@ -122,10 +122,10 @@ Two constraints on the inputs remain load-bearing:
 
 * **The burn rate is a median of complete days, not a mean, and today is excluded.** One
   expensive session moves a mean for a week.
-* **History predating the limit's creation is not used.** A key's `updated_at` records when
-  its limit was set; spend before that date happened under no cap, and treating it as evidence
-  of the current pace predicts exhaustion the cap makes impossible. The measured account
-  contained exactly this case — its heaviest historical day predates its limit.
+* **History is bounded by the trailing window, not by the cap's age.** The trailing 7-day
+  window is the only bound on which buckets may be drawn from. No pre-cap floor is applied,
+  because the payload carries no trustworthy "this limit was set at" timestamp — see the
+  amendment of 2026-10-09 below, which replaces the constraint that stood here.
 
 The state is subject to hysteresis: once a level is entered it is left only when the metric
 clears the threshold by a margin, so a key hovering at the boundary does not oscillate the
@@ -166,7 +166,9 @@ they are written, the confirmation is review plus a manual check against a live 
 * the same key at 81% is critical; the same key at 80% with the reset inside the hour is `warn`;
 * a lifetime key whose runway crosses 3 days warns, and the same key with a `daily` reset does
   not;
-* a key whose only spend precedes its limit's `updated_at` stays at `none`;
+* a bucket outside the trailing 7-day window is ignored, and a `limitState` call carrying an
+  `updatedAt` / `updated_at` field produces the same level as one without it — the field is
+  deliberately not read (see the amendment of 2026-10-09);
 * a key with headroom worth hundreds of requests but a high consumed share still **warns** —
   the request floor the earlier draft had must not reappear;
 * the dot maps each level to its documented color.
@@ -235,3 +237,51 @@ shapes they established are the ratio between an hour's burn and a daily cap, an
 days that crossed each candidate threshold. OpenRouter's analytics API is in beta, and the
 hourly granularity used for this measurement is not what the plugin reads at runtime; if
 `limit_reset` gains new values, the branch in this decision is incomplete, not wrong.
+
+### Amendment, 2026-10-09
+
+The Decision Outcome originally carried a constraint: "History predating the limit's creation
+is not used." Its premise was that a key's `updated_at` records when its limit was set. **That
+premise could not be confirmed.** The client half implemented the floor faithfully; the host
+half never supplied the field, so the floor was inert and every bucket survived it. The
+constraint is withdrawn and the inert code removed.
+
+What the live account showed on 2026-10-09, across the 9 keys carrying a limit:
+
+| Observation | Result | What it settles |
+|---|---|---|
+| `updated_at` is `null` | **7 of 9 keys** | Consistent with either reading: a limit set at creation leaves nothing to record, and so does a field that only records later mutations |
+| `updated_at` equals `created_at` | 0 keys | Nothing — `created_at` is never echoed back |
+| `updated_at` equals `last_used_at` | 0 keys | Nothing — usage does not move the field |
+
+The measurement does **not** settle the field's meaning, and read-only access cannot: there is
+no second reference point to compare against, and a limit set at key creation would leave
+`updated_at` null forever. On both keys where the field is present it falls *before*
+`last_used_at`, which is exactly what "the cap was set, then the key was used" would produce —
+so that ordering is consistent with the original premise rather than evidence against it. The
+honest position is that `updated_at` may mean "limit set at", "record last mutated", or
+something else, and nothing available here can tell them apart.
+
+Neither the host nor the client ever read it: `readKeyLimits` emits exactly four fields —
+`limit`, `limitRemaining`, `limitReset`, `disabled` — so the client's `windowedBurn` floor
+was inert by construction. The floor has been removed rather than wired up. With the semantics
+unverifiable, the decision rests on the asymmetry between the two cases:
+
+1. **If the field does not mean "limit set at", the filter is noise.** It would drop history on
+   a false premise, and — see the next point — could do so harmfully.
+2. **If it does, the benefit is still only 2 keys in 9**, and wiring it costs a fifth payload
+   field plus an amendment to ADR-0002's four-field constraint.
+3. **The failure mode is silent and permanent.** `closedDayTotals` needs
+   `LIMIT_MIN_CLOSED_DAYS` (3) complete days before the lifetime branch computes any runway. A
+   floor that excludes too many buckets drives the count below that gate and the branch returns
+   `none` — not once, but on every poll, with nothing in the UI to say why. The original text
+   mandated exactly this outcome for one case: "a key whose only spend precedes its limit's
+   `updated_at` stays at `none`". An unverified timestamp is not worth an alarm that can
+   disable itself without a word.
+
+The trailing window remains the only bound on the input: buckets are drawn from the last 7
+days, never the future, and a stamp that will not parse is kept rather than dropped. The
+"loudest historical day predates the limit" case the original text cited is unaddressed by
+this amendment and accepted as a known limitation: a key idle for months and then used heavily
+is judged by a median near zero, so it can warn late. Revisit when OpenRouter documents a
+limit-modification timestamp, or when `updated_at` stops being null on most keys.

@@ -335,10 +335,24 @@ There is no `limitPace` key. An earlier draft had one for the period-end project
 projection was rejected in ADR-0001, so the key goes with it.
 
 Pluralization: `limitApproxRequests` and `limitDaysAtRate` need Russian genitive plurals
-(`1 запрос` / `2 запроса` / `5 запросов`). If the locale layer does not expose a plural
-helper, the honest fallback is to drop the count from the primary sentence and keep it in a
-detail line, rather than shipping "1 запросов". The exposure is now small: the request count
-appears only at the `ok` level, since warn and critical carry the time estimate instead.
+(`1 запрос` / `2 запроса` / `5 запросов`). The locale layer exposes no plural helper — its
+dictionary is a flat `Record<string, string>` with `{name}` substitution only — so an earlier
+draft of this design specified the fallback of dropping the count from the primary sentence
+rather than shipping "1 запросов". **That fallback is no longer taken**: the form is now
+selected in code, because `Intl.PluralRules` is available in every target and a pure selector
+is testable without touching the locale layer.
+
+The convention that follows, for any future counted string:
+
+* the **base key is the fallback form** and stays present in all three languages, so an
+  unknown locale or a category with no dedicated key still renders a real sentence;
+* a language that needs more than one form **adds suffixed keys** — `_zero`, `_one`, `_two`,
+  `_few`, `_many`, `_other` — matching the CLDR categories `Intl.PluralRules` returns for
+  that language (for Russian: `one` for 1 and 21, `few` for 2–4 and 22–24, `many` for 0 and
+  5–20, and `many` doubles as the fallback);
+* Chinese needs no suffixed keys at all: it has only the `other` category;
+* since `t` returns the key itself on a miss, the selector probes the suffixed key first and
+  falls back to the base key when the probe returns its own name.
 
 Rounding: money uses the existing `fmtMoney` precision rules; request counts are rounded to
 one significant figure for the approximation (`≈ 140 requests`, not `≈ 138 requests`), and the
