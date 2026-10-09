@@ -350,22 +350,30 @@ test('runwayText renders the heaviest-hour span, and no burn means no text', () 
   assert.equal(limitState({ limit: 12, limitRemaining: 2.4, limitReset: null, burn: [], nowMs: NOW }).runwayText, undefined);
 });
 
-test('spend booked before the limit was last changed does not set the rate', () => {
-  // Every recorded bucket predates the cap as it now stands, so nothing in the
-  // history describes this cap: no rate, no runway, no warning.
+test('a limit timestamp is ignored: neither the level nor the runway moves', () => {
+  // The field is deliberately not read. The host does not ship it — `readKeyLimits`
+  // in index.js emits only limit, limitRemaining, limitReset and disabled — and on
+  // the live API its meaning is unverified, so it cannot be trusted as "this cap was
+  // set at". These are the buckets that a pre-cap floor used to discard; under the
+  // documented behaviour they must count whether the field is present or not.
   const burn = burnFor(NOW, 30, 5);
   const updatedAt = new Date(NOW).toISOString();
-  const stale = limitState({ limit: 100, limitRemaining: 70, limitReset: null, burn, nowMs: NOW, updatedAt });
-  assert.equal(stale.level, 'none');
-  assert.equal(stale.runwayText, undefined);
-  // Without the rewrite the very same buckets do warn, so the field is the cause.
-  const fresh = limitState({ limit: 100, limitRemaining: 70, limitReset: null, burn, nowMs: NOW });
-  assert.equal(fresh.level, 'warn');
-  // The snake_case spelling the management payload uses is read too.
-  assert.equal(limitState({ limit: 100, limitRemaining: 70, limitReset: null, burn, nowMs: NOW, updated_at: updatedAt }).level, 'none');
-  // A rewrite older than the history changes nothing: the buckets still count.
+  const bare = limitState({ limit: 100, limitRemaining: 70, limitReset: null, burn, nowMs: NOW });
+  assert.equal(bare.level, 'warn');
+  assert.equal(bare.runwayDays, 70 / 30);
+  // A stamp at the moment of polling no longer erases the history.
+  const stamped = limitState({ limit: 100, limitRemaining: 70, limitReset: null, burn, nowMs: NOW, updatedAt });
+  assert.equal(stamped.level, 'warn');
+  assert.equal(stamped.runwayDays, bare.runwayDays);
+  assert.equal(stamped.runwayText, bare.runwayText);
+  // The snake_case spelling the management payload uses is ignored just the same.
+  const snake = limitState({ limit: 100, limitRemaining: 70, limitReset: null, burn, nowMs: NOW, updated_at: updatedAt });
+  assert.equal(snake.level, 'warn');
+  assert.equal(snake.runwayDays, bare.runwayDays);
+  // An old stamp and an unparseable one change nothing either: the field never gates.
   const older = new Date(NOW - 30 * 86_400_000).toISOString();
   assert.equal(limitState({ limit: 100, limitRemaining: 70, limitReset: null, burn, nowMs: NOW, updatedAt: older }).level, 'warn');
+  assert.equal(limitState({ limit: 100, limitRemaining: 70, limitReset: null, burn, nowMs: NOW, updatedAt: 'not a date' }).level, 'warn');
 });
 
 test('an imminent reset speaks in minutes, and a far one in clock time', () => {
