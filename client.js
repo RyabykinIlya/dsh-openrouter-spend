@@ -18,6 +18,9 @@ window.__ModuleLoader__.load({
     const PREFS_CHANGED = 'ors:prefs';
     const EVENT_OPEN_POPOVER = 'ors:open-popover';
 
+    /** The host's one summary route; `?force=1` asks it to skip its own cache. */
+    const SUMMARY_URL = '/openrouter-spend/summary';
+
     /**
      * The locale `apply` last saw. Factory scope, not component state: a plural
      * form is chosen while building a string, and the components read the active
@@ -94,6 +97,20 @@ window.__ModuleLoader__.load({
 .ors-bar { flex: 1 1 0; min-height: 1px; border-radius: 1px; background: var(--dsw-alias-state-business-primary); opacity: 0.65; }
 .ors-bar[data-today="true"] { opacity: 1; }
 .ors-note { margin-top: 8px; color: var(--dsw-alias-state-warn-primary, #c08b00); font: var(--dsw-font-xxs-12, 12px/1.4 system-ui); }
+/* The refresh failure block: the sentence, the wire's own detail under it, the
+   countdown to the next automatic attempt, and the button that asks for one now.
+   It replaces the bare error line, which named the fault but never the schedule. */
+.ors-refresh { margin-top: 8px; padding-top: 8px; border-top: 0.5px solid var(--dsw-alias-separator-primary); }
+.ors-detail { word-break: break-word; }
+.ors-refresh-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 6px; }
+.ors-retry {
+  padding: 3px 10px; border: 0; border-radius: 6px; cursor: pointer;
+  background: var(--dsw-alias-interactive-bg-hover, transparent);
+  color: var(--dsw-alias-label-primary);
+  font: var(--dsw-font-xxs-12, 12px/1.4 system-ui);
+}
+.ors-retry:hover:not(:disabled) { background: var(--dsw-alias-interactive-bg-hover-solid, var(--dsw-alias-interactive-bg-hover)); }
+.ors-retry:disabled { cursor: default; color: var(--dsw-alias-label-tertiary); }
 /* The limit block. The meter shows what is *consumed*, so it fills as the cap
    approaches and agrees with the percentage printed beside it. */
 .ors-quota { margin: 10px 0 8px; padding-top: 9px; border-top: 0.5px solid var(--dsw-alias-separator-primary); }
@@ -201,7 +218,6 @@ window.__ModuleLoader__.load({
          * so a rounding to zero does not claim a session spent nothing.
          */
         fmtPair: (first, second) => {
-          const scale = value => (Number(value) || 0) * (rub ? rate : 1);
           const magnitude = value => Math.abs(scale(value));
           const anyCents = magnitude(first) >= 0.01 || magnitude(second) >= 0.01;
           const digits = anyCents ? 2 : 4;
@@ -258,9 +274,49 @@ window.__ModuleLoader__.load({
       return readPref(PREF_SEEN_LIMIT, '');
     }
 
-    /** Write the seen limit as `${keyId}:${level}`. */
-    function writeSeenLimit(keyId, level) {
-      writePref(PREF_SEEN_LIMIT, `${keyId}:${level}`);
+    /**
+     * The period a seen limit was seen in, as the design doc pins it
+     * (docs/design/limit-notice.md, "Retirement — seen"): the UTC day for
+     * `daily`, the ISO week for `weekly`, the ISO month for `monthly`, and
+     * the literal `ever` for a lifetime cap. Each anchor is the same UTC
+     * midnight `nextResetMs` refills the budget on, so the key turns exactly
+     * when the budget does.
+     */
+    function periodStartKey(limitReset, nowMs) {
+      if (limitReset === 'daily') return new Date(nowMs).toISOString().slice(0, 10);
+      if (limitReset === 'weekly') {
+        // The ISO week runs Monday to Sunday, and the Thursday of the week
+        // decides the ISO year: a week straddling New Year belongs to the
+        // year that holds more of it. Jan 4 always sits inside week 1, which
+        // is what makes the count a subtraction rather than a calendar walk.
+        const date = new Date(nowMs);
+        const weekday = (date.getUTCDay() + 6) % 7;
+        const thursday = Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate() - weekday + 3);
+        const year = new Date(thursday).getUTCFullYear();
+        const week = 1 + Math.round((thursday - Date.UTC(year, 0, 4)) / (7 * MS_PER_DAY));
+        return `${year}-W${String(week).padStart(2, '0')}`;
+      }
+      if (limitReset === 'monthly') return new Date(nowMs).toISOString().slice(0, 7);
+      return 'ever';
+    }
+
+    /**
+     * The full seen-limit key, `` `${keyId}:${level}:${periodStart}` `` — the
+     * design doc's contract. The period in the key is what re-arms the toast:
+     * a daily cap exhausted yesterday warns again today, because the budget
+     * is genuinely new. Pure and clock-fed so the turn of a period is
+     * testable without a component. A value stored by an older build
+     * (`${keyId}:${level}`, no period) matches nothing, which re-arms every
+     * key once on upgrade — the honest direction: one extra warning beats a
+     * permanently muted one.
+     */
+    function seenLimitKey(keyId, level, limitReset, nowMs = Date.now()) {
+      return `${keyId}:${level}:${periodStartKey(limitReset, nowMs)}`;
+    }
+
+    /** Write the seen limit as `${keyId}:${level}:${periodStart}`. */
+    function writeSeenLimit(keyId, level, limitReset) {
+      writePref(PREF_SEEN_LIMIT, seenLimitKey(keyId, level, limitReset));
     }
 
     /** The ADR-0001 thresholds, used when the host sends none. */
@@ -299,7 +355,13 @@ window.__ModuleLoader__.load({
         return value > 1e12 ? value : value * 1000;
       }
       if (typeof value === 'string') {
-        const at = Date.parse(value);
+        // A zone-less date-time — the `date__hour` shape the analytics wire
+        // sends — is UTC by contract: OpenRouter aggregates the UTC day. A
+        // bare `Date.parse` reads it in the READER's zone, skewing the burn
+        // window by the local offset (m12), so the designator is supplied
+        // here and both helpers that read these stamps share one clock.
+        const utc = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?$/.test(value) ? `${value}Z` : value;
+        const at = Date.parse(utc);
         return Number.isFinite(at) ? at : undefined;
       }
       return undefined;
@@ -371,15 +433,23 @@ window.__ModuleLoader__.load({
       return peak;
     }
 
-    /** Spend per closed UTC day, today excluded because it is still filling. */
+    /**
+     * Spend per closed UTC day, today excluded because it is still filling.
+     * Stamps go through `parseInstant` so the day is the UTC day for every
+     * shape the wire uses: a numeric epoch counts here exactly as it counts
+     * in `windowedBurn`'s window (m12 made the siblings consistent — they
+     * used to disagree about numeric stamps). A stamp that will not parse is
+     * skipped while `windowedBurn` keeps it: a figure with no day must not
+     * vanish from the window, but it cannot contribute to a per-day rate.
+     */
     function closedDayTotals(burn, nowMs) {
       const today = new Date(nowMs).toISOString().slice(0, 10);
       const totals = new Map();
       for (const bucket of Array.isArray(burn) ? burn : []) {
-        const stamp = bucket?.ts;
         const usd = Number(bucket?.usd);
-        if (typeof stamp !== 'string' || stamp.length < 10 || !Number.isFinite(usd)) continue;
-        const day = stamp.slice(0, 10);
+        const at = parseInstant(bucket?.ts);
+        if (at === undefined || !Number.isFinite(usd)) continue;
+        const day = new Date(at).toISOString().slice(0, 10);
         if (day === today) continue;
         totals.set(day, (totals.get(day) ?? 0) + usd);
       }
@@ -457,6 +527,11 @@ window.__ModuleLoader__.load({
       const avgRequestUsd = Number(input?.avgRequestUsd);
       const lifetime = limitReset === null || limitReset === undefined;
       const shared = {
+        // The raw `limitReset` rides along (M1): the toast reads it to name
+        // the period the cap refills on, and without it every periodic-cap
+        // toast introduced itself as "lifetime". Raw and unparsed on purpose
+        // — the consumers compare it against the wire's own vocabulary.
+        limitReset,
         limitUsd: cap,
         remainingUsd,
         percent,
@@ -638,15 +713,91 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * The dictionary key naming the period a limit toast speaks about. Pure,
+     * so the phrase cannot drift from the period the state carries: the Toast
+     * used to read `state.limitReset`, which `limitState` never returned, so
+     * every periodic cap introduced itself as "lifetime" (M1). Lifetime is
+     * checked first because it is the derived truth, not one more string
+     * comparison against the wire's vocabulary.
+     */
+    function toastPeriodKey(state) {
+      if (state?.lifetime) return 'limitToastPeriodLifetime';
+      if (state?.limitReset === 'daily') return 'periodToday';
+      if (state?.limitReset === 'weekly') return 'periodWeek';
+      if (state?.limitReset === 'monthly') return 'periodMonth';
+      return 'limitToastPeriodLifetime';
+    }
+
+    /**
      * The dot state. A broken reading outranks a full budget — `error` and
      * `no-credential` stay visible — and a limit level outranks `stale`, because
      * stale figures beside an exhausted cap still need to say so.
+     *
+     * `error` stays mapped although today's host turns its 502s into client
+     * failures before a payload is ever rendered (N1): the mapping describes
+     * the status vocabulary the route documents, and a host that ever serves
+     * `status: 'error'` with a 200 must still get the red dot. The cost is one
+     * CSS rule; the alternative is a status the wire can name but the dot
+     * cannot show.
      */
     function dotState(status, level) {
       if (status === 'error' || status === 'no-credential') return status;
       if (level === 'critical') return 'limit-critical';
       if (level === 'warn') return 'limit-warn';
       return status ?? 'loading';
+    }
+
+    /**
+     * Milliseconds to the next attempt after `failures` consecutive failures.
+     * The host schedules its own retries and announces them as `nextRefreshAt`;
+     * this mirror only covers a host that never answered at all, where there is
+     * no announcement to follow. The ladder matches the host's: quick once,
+     * then the ordinary cadence, never longer than it.
+     */
+    function retryDelayMs(failures, refreshSeconds) {
+      const ladder = failures <= 1 ? 15 : failures === 2 ? 30 : refreshSeconds;
+      return Math.min(ladder, refreshSeconds) * 1000;
+    }
+
+    /**
+     * When the next poll is due. A failed read follows the host's own
+     * `nextRefreshAt`, because that is where the retry ladder lives; an explicit
+     * interval preference is the user's cadence and governs healthy reads.
+     * `nowMs` is a parameter so the schedule is testable without a clock.
+     */
+    function nextPollMs(data, intervalSeconds, nowMs) {
+      const announced = Date.parse(data?.nextRefreshAt ?? '');
+      const failed = data?.status === 'stale' || data?.status === 'error';
+      if (failed && Number.isFinite(announced)) return announced;
+      if (intervalSeconds > 0) return nowMs + intervalSeconds * 1000;
+      if (Number.isFinite(announced)) return announced;
+      return nowMs + (Number(data?.refreshSeconds) || 60) * 1000;
+    }
+
+    /** `m:ss` for a countdown. Zero and negatives read as `0:00`, never `-1`. */
+    function formatCountdown(ms) {
+      const total = Math.max(0, Math.ceil(ms / 1000));
+      return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, '0')}`;
+    }
+
+    /**
+     * The dictionary key naming a failure code. The code comes from the host
+     * (`describeFailure`) or from this half for a reply that never arrived; the
+     * raw detail always rides beside the sentence, so an unrecognised code
+     * still leaves the reader something to act on.
+     */
+    function failureLabelKey(code) {
+      switch (code) {
+        case 'network': return 'errorNetwork';
+        case 'timeout': return 'errorTimeout';
+        case 'auth': return 'errorAuth';
+        case 'rate-limit': return 'errorRateLimit';
+        case 'request': return 'errorRequest';
+        case 'server': return 'errorServer';
+        case 'data': return 'errorData';
+        case 'host': return 'errorHost';
+        default: return 'errorUnknown';
+      }
     }
 
     /** Store one viewing preference and tell the other component about it. */
@@ -674,8 +825,13 @@ window.__ModuleLoader__.load({
      * `SUMMARY_COALESCE_MS` of each other share the one request.
      *
      * `force` is for a caller the window must not answer: the Settings Reload
-     * button is an explicit request for the current figures, so it must not be
-     * handed a reply that was already in flight.
+     * button and the popover's Retry are explicit requests for the current
+     * figures, so they must not be handed a reply that was already in flight.
+     * The host skips its own cache for them as well.
+     *
+     * The answer is a result rather than a payload: a reply that never arrived
+     * is a state the chip has to show, and it cannot share the `undefined` that
+     * "nothing to change" used to mean.
      */
     function fetchSummary(force) {
       const at = Date.now();
@@ -683,11 +839,100 @@ window.__ModuleLoader__.load({
         return summaryInflight;
       }
       summaryInflightAt = at;
-      summaryInflight = fetch('/openrouter-spend/summary', {
+      summaryInflight = fetch(force ? `${SUMMARY_URL}?force=1` : SUMMARY_URL, {
         credentials: 'same-origin',
         headers: { accept: 'application/json' },
-      }).then(response => (response.ok ? response.json() : undefined)).catch(() => undefined);
+      }).then(async response => {
+        if (!response.ok) {
+          // The plugin's own route answered badly; its body carries the reason.
+          const detail = await response.json().catch(() => undefined);
+          return {
+            ok: false,
+            reason: typeof detail?.error === 'string' ? detail.error : `HTTP ${response.status}`,
+            code: response.status === 502 ? 'host' : 'request',
+          };
+        }
+        return { ok: true, data: await response.json() };
+      }).catch(error => ({
+        ok: false,
+        reason: error instanceof Error ? error.message : String(error),
+        code: 'network',
+      }));
       return summaryInflight;
+    }
+
+    /**
+     * The one poll the two live components share. Every reply announces its own
+     * schedule (`nextRefreshAt`), so the timer follows the host rather than a
+     * fixed interval — that is what makes the shorter retry after a failure both
+     * real and visible. `failure` is the last read that did not succeed: the
+     * host's own `stale` verdict, or a reply that never arrived.
+     *
+     * `intervalSeconds` is the user's explicit preference; it governs healthy
+     * reads and is passed through to `nextPollMs`.
+     */
+    function useSummaryPoll(intervalSeconds) {
+      const [data, setData] = useState(null);
+      const [failure, setFailure] = useState(null);
+      const [busy, setBusy] = useState(false);
+      const [dueAt, setDueAt] = useState(0);
+      const [nowMs, setNowMs] = useState(() => Date.now());
+      const failuresRef = useRef(0);
+      const busyRef = useRef(false);
+      const aliveRef = useRef(true);
+
+      // Reset on mount as well as cleared on unmount: a development double-mount
+      // runs the cleanup once, and a flag that only ever goes false would leave
+      // the component unable to render a reply for the rest of its life.
+      useEffect(() => {
+        aliveRef.current = true;
+        return () => { aliveRef.current = false; };
+      }, []);
+
+      const load = useCallback(async force => {
+        // One read at a time per component: a manual Retry while a poll is in
+        // flight must not become two upstream queries. The in-flight read sets
+        // the next `dueAt` itself, so a dropped tick cannot stall the poll.
+        if (busyRef.current) return;
+        busyRef.current = true;
+        setBusy(true);
+        const reply = await fetchSummary(force);
+        busyRef.current = false;
+        if (!aliveRef.current) return;
+        setBusy(false);
+        setNowMs(Date.now());
+        if (reply.ok) {
+          const payload = reply.data;
+          setData(payload);
+          const failed = payload.status === 'stale' || payload.status === 'error';
+          failuresRef.current = failed ? failuresRef.current + 1 : 0;
+          setFailure(failed ? { reason: payload.error ?? '', code: payload.errorCode } : null);
+          setDueAt(nextPollMs(payload, intervalSeconds, Date.now()));
+        } else {
+          failuresRef.current += 1;
+          setFailure({ reason: reply.reason, code: reply.code });
+          const seconds = intervalSeconds > 0 ? intervalSeconds : 60;
+          setDueAt(Date.now() + retryDelayMs(failuresRef.current, seconds));
+        }
+      }, [intervalSeconds]);
+
+      // The timer follows `dueAt`, which every completed read rewrites.
+      useEffect(() => {
+        const delay = dueAt === 0 ? 0 : Math.max(1000, dueAt - Date.now());
+        const timer = setTimeout(() => { void load(false); }, delay);
+        return () => clearTimeout(timer);
+      }, [dueAt, load]);
+
+      // The countdown needs a clock only while something is wrong.
+      useEffect(() => {
+        if (failure === null) return undefined;
+        const timer = setInterval(() => setNowMs(Date.now()), 1000);
+        return () => clearInterval(timer);
+      }, [failure]);
+
+      const refresh = useCallback(() => { void load(true); }, [load]);
+
+      return { data, failure, busy, dueAt, nowMs, refresh };
     }
 
     /**
@@ -701,12 +946,7 @@ window.__ModuleLoader__.load({
 
       const percent = Math.round(state.percent ?? 0);
       const limit = money.fmt(state.limitUsd);
-      const period = state.lifetime ? t('limitToastPeriodLifetime')
-        : state.limitReset === 'daily' ? t('periodToday')
-        : state.limitReset === 'weekly' ? t('periodWeek')
-        : state.limitReset === 'monthly' ? t('periodMonth')
-        : t('limitToastPeriodLifetime');
-      
+      const period = t(toastPeriodKey(state));
       const estimate = state.runwayMs !== undefined
         ? fmtDuration(state.runwayMs)
         : state.runwayDays !== undefined
@@ -743,7 +983,6 @@ window.__ModuleLoader__.load({
 
     function Pill(props) {
       const { t, sessionId } = props;
-      const [data, setData] = useState(null);
       const [open, setOpen] = useState(false);
       const [range, setRange] = useState('today');
       const [keyId, setKeyId] = useState(() => readPref(PREF_KEY_ID, ''));
@@ -754,17 +993,31 @@ window.__ModuleLoader__.load({
       const rootRef = useRef(null);
       // The previous level, so `limitState` can apply its hysteresis without
       // becoming stateful. A ref and not state: it must not trigger a render.
-      const levelRef = useRef('none');
-
-      useEffect(() => { void fetchSummary().then(reply => { if (reply !== undefined) setData(reply); }); }, []);
-
-      const seconds = intervalSeconds > 0 ? intervalSeconds : Number(data?.refreshSeconds) || 60;
-      useEffect(() => {
-        const timer = setInterval(() => {
-          void fetchSummary().then(reply => { if (reply !== undefined) setData(reply); });
-        }, seconds * 1000);
-        return () => clearInterval(timer);
-      }, [seconds]);
+      // The history also names the key it belongs to: a key switch must not
+      // carry the old key's level into the new key's hysteresis (m10) — a
+      // critical key followed by a warn key would otherwise hold the warn
+      // at critical's leave-margin and misreport it.
+      const levelRef = useRef({ keyId: '', level: 'none' });
+      // The figures, the last failure, and the schedule the host announced.
+      const { data, failure, busy, dueAt, nowMs, refresh } = useSummaryPoll(intervalSeconds);
+      // How long until the next automatic attempt, and the two sentences that
+      // carry it: the chip's tooltip and the panel's status block.
+      const retryIn = formatCountdown(Math.max(0, dueAt - nowMs));
+      const failureText = failure === null
+        ? undefined
+        : t('refreshFailed', { reason: t(failureLabelKey(failure.code)) });
+      const chipTitle = failure === null
+        ? t('open')
+        : t('refreshFailedTitle', { reason: t(failureLabelKey(failure.code)), time: retryIn });
+      // With nothing read yet, a failure is still amber rather than grey: the
+      // chip is not loading, it is waiting for a retry, and the tooltip says
+      // so. A failure beside a good read is amber too (ADR-0005: "the last
+      // good figures are still on screen, but the latest read failed") — the
+      // blue dot would say healthy exactly when the reader stopped being
+      // served. The broken statuses outrank it: `no-credential` keeps its red.
+      const dotStatus = failure === null
+        ? data?.status
+        : data?.status === 'ok' || data?.status === undefined ? 'stale' : data?.status;
 
       // The Settings section writes the same preferences; follow it live.
       useEffect(() => {
@@ -861,7 +1114,7 @@ window.__ModuleLoader__.load({
           limitReset: keyLimit?.limitReset,
           burn: keyBurn,
           avgRequestUsd,
-          previous: levelRef.current,
+          previous: levelRef.current.keyId === keyId ? levelRef.current.level : 'none',
           thresholds: data?.limitThresholds,
         })
         : undefined;
@@ -872,15 +1125,16 @@ window.__ModuleLoader__.load({
       // appear on.
       useEffect(() => {
         if (noticeState === undefined) return;
-        levelRef.current = noticeState.level;
+        levelRef.current = { keyId, level: noticeState.level };
       });
-      // When the popover opens, mark the current level as seen. This effect must
+      // When the popover opens, mark the current level as seen, in the period
+      // the cap is currently running (M2: the design doc's key). This effect must
       // stay *below* the `noticeState` declaration: its dependency array is read
       // during render, and reading a `const` above its own declaration is a
       // temporal dead zone reference that throws on every render.
       useEffect(() => {
         if (open && noticeOn && keyId !== '' && noticeState?.level && noticeState.level !== 'none') {
-          writeSeenLimit(keyId, noticeState.level);
+          writeSeenLimit(keyId, noticeState.level, noticeState.limitReset);
         }
       }, [open, noticeOn, keyId, noticeState?.level]);
       // A key with spend but no readable limit must say so. Silence reads as
@@ -973,22 +1227,25 @@ window.__ModuleLoader__.load({
           type: 'button',
           className: 'ors-chip',
           'aria-expanded': open,
-          'aria-label': t('open'),
-          title: t('open'),
+          'aria-label': chipTitle,
+          title: chipTitle,
           onClick: () => setOpen(value => !value),
         },
         h('span', {
           className: 'ors-chip-dot',
           role: 'img',
-          'data-state': dotState(data?.status, noticeState?.level),
+          'data-state': dotState(dotStatus, noticeState?.level),
           // The dot is the only at-a-glance signal, so its colour is always
-          // doubled by a label naming the level.
+          // doubled by a label naming the level — or, when there is no level to
+          // name, by the reason the figures are stale.
           'aria-label': noticeState?.level === 'critical' ? t('limitLevelCritical')
             : noticeState?.level === 'warn' ? t('limitLevelWarn')
-            : undefined,
+            : failureText,
         }),
         h('span', { className: 'ors-chip-amount' },
-          data === null ? t('loading') : chipPair ?? money.fmt(view.usd))),
+          data === null
+            ? (failure === null ? t('loading') : '\u2014')
+            : chipPair ?? money.fmt(view.usd))),
         open && h('div', { className: 'ors-panel' },
           h('div', { className: 'ors-head' },
             h('span', { className: 'ors-label' }, rangeLabel),
@@ -1055,7 +1312,25 @@ window.__ModuleLoader__.load({
               style: { height: `${Math.max(2, Math.round((entry.usd / peak) * 34))}px` },
               title: `${entry.date} · ${money.fmt(entry.usd)}`,
             }))),
-          data?.error === undefined ? null : h('div', { className: 'ors-note' }, data.error)));
+          failure === null ? null : h('div', { className: 'ors-refresh' },
+            h('div', { className: 'ors-note' }, failureText),
+            // The wire's own words, so a fault nobody classified is still
+            // actionable rather than rounded off to "something went wrong".
+            failure.reason === '' ? null : h('div', { className: 'ors-sub ors-detail' }, failure.reason),
+            h('div', { className: 'ors-refresh-row' },
+              h('span', { className: 'ors-sub' }, t('nextAttemptIn', { time: retryIn })),
+              h('button', {
+                type: 'button',
+                className: 'ors-retry',
+                // Disabled for any read in flight, not just a forced one: a
+                // click during a poll would be dropped, and a button that does
+                // nothing when pressed is worse than one that says why.
+                disabled: busy,
+                onClick: () => refresh(),
+                // The label derives from the same state that disables the
+                // button (m11): it used to read "Retry now" while a background
+                // poll held it disabled, promising the action it refuses.
+              }, busy ? t('retrying') : t('retryNow'))))));
     }
 
     /**
@@ -1064,24 +1339,17 @@ window.__ModuleLoader__.load({
      */
     function ToastOverlay(props) {
       const { t } = props;
-      const [data, setData] = useState(null);
       const [keyId, setKeyId] = useState(() => readPref(PREF_KEY_ID, ''));
       const [currency, setCurrency] = useState(readCurrency);
       const [noticeOn, setNoticeOn] = useState(readLimitNotice);
       const [seenLimit, setSeenLimit] = useState(() => readSeenLimit());
       const [toastLevel, setToastLevel] = useState('none');
-      const levelRef = useRef('none');
-
-      // Fetch summary on mount and on interval.
-      useEffect(() => { void fetchSummary().then(reply => { if (reply !== undefined) setData(reply); }); }, []);
-
-      const seconds = Number(data?.refreshSeconds) || 60;
-      useEffect(() => {
-        const timer = setInterval(() => {
-          void fetchSummary().then(reply => { if (reply !== undefined) setData(reply); });
-        }, seconds * 1000);
-        return () => clearInterval(timer);
-      }, [seconds]);
+      // The escalation history, scoped to the tracked key (m10): the old key's
+      // level must not decide the new key's hysteresis or swallow its toast.
+      const levelRef = useRef({ keyId: '', level: 'none' });
+      // The overlay has no interval preference of its own: it reads on the
+      // host's schedule, which is the same one the chip follows.
+      const { data } = useSummaryPoll(0);
 
       // Sync preferences from other components.
       useEffect(() => {
@@ -1111,10 +1379,17 @@ window.__ModuleLoader__.load({
           limitReset: keyLimit?.limitReset,
           burn: keyBurn,
           avgRequestUsd,
-          previous: levelRef.current,
+          previous: levelRef.current.keyId === keyId ? levelRef.current.level : 'none',
           thresholds: data?.limitThresholds,
         })
         : undefined;
+
+      // A toast belongs to the key it escalated on. When the tracked key
+      // changes, retire it rather than re-render the old escalation against
+      // the new key's figures; a fresh escalation for the new key re-fires in
+      // the effect below. Declared above that effect so the reset lands first
+      // within one commit.
+      useEffect(() => { setToastLevel('none'); }, [keyId]);
 
       // Carry the level forward and read the escalation in one pass: the previous
       // level must be captured before it is overwritten, and two effects cannot
@@ -1123,10 +1398,13 @@ window.__ModuleLoader__.load({
       useEffect(() => {
         if (noticeState === undefined) return;
         const current = noticeState.level;
-        const previous = levelRef.current;
-        levelRef.current = current;
+        const previous = levelRef.current.keyId === keyId ? levelRef.current.level : 'none';
+        levelRef.current = { keyId, level: current };
         if (!noticeOn || keyId === '') return;
-        if (escalates(previous, current) && seenLimit !== `${keyId}:${current}`) {
+        // The seen key names the period the cap is running in (M2), so a
+        // dismissal last period does not silence this one: a budget that
+        // refilled is genuinely new and must be allowed to warn again.
+        if (escalates(previous, current) && seenLimit !== seenLimitKey(keyId, current, noticeState.limitReset)) {
           setToastLevel(current);
         }
       });
@@ -1135,18 +1413,18 @@ window.__ModuleLoader__.load({
 
       const handleDismiss = useCallback(() => {
         if (keyId !== '' && toastLevel !== 'none') {
-          writeSeenLimit(keyId, toastLevel);
+          writeSeenLimit(keyId, toastLevel, noticeState?.limitReset);
           setToastLevel('none');
         }
-      }, [keyId, toastLevel]);
+      }, [keyId, toastLevel, noticeState?.limitReset]);
 
       const handleOpen = useCallback(() => {
         window.dispatchEvent(new CustomEvent(EVENT_OPEN_POPOVER));
         if (keyId !== '' && toastLevel !== 'none') {
-          writeSeenLimit(keyId, toastLevel);
+          writeSeenLimit(keyId, toastLevel, noticeState?.limitReset);
           setToastLevel('none');
         }
-      }, [keyId, toastLevel]);
+      }, [keyId, toastLevel, noticeState?.limitReset]);
 
       if (!noticeOn || toastLevel === 'none' || !noticeState) return null;
 
@@ -1173,7 +1451,8 @@ window.__ModuleLoader__.load({
 
       const reload = useCallback(async (force) => {
         const reply = await fetchSummary(force);
-        if (reply !== undefined) setData(reply);
+        if (reply.ok) setData(reply.data);
+        else setNotice(reply.reason);
       }, []);
 
       useEffect(() => { void reload(); }, [reload]);
@@ -1314,11 +1593,19 @@ window.__ModuleLoader__.load({
       withBurnNote,
       dotState,
       escalates,
+      toastPeriodKey,
+      periodStartKey,
+      seenLimitKey,
+      retryDelayMs,
+      nextPollMs,
+      formatCountdown,
+      failureLabelKey,
       fmtDuration,
       nextResetMs,
       resetTextFor,
       median,
       peakHourlyBurn,
+      windowedBurn,
       closedDayTotals,
       apply(ctx) {
         // The active locale drives the plural form, so it is tracked here rather
@@ -1366,6 +1653,20 @@ window.__ModuleLoader__.load({
             clear: 'Clear',
             reload: 'Reload',
             saved: 'Saved',
+            refreshFailed: 'Could not refresh: {reason}',
+            refreshFailedTitle: 'OpenRouter spend \u2014 could not refresh: {reason}. Next attempt in {time}.',
+            nextAttemptIn: 'Next attempt in {time}',
+            retryNow: 'Retry now',
+            retrying: 'Retrying\u2026',
+            errorNetwork: 'OpenRouter is unreachable from this machine',
+            errorTimeout: 'OpenRouter did not answer in time',
+            errorAuth: 'the management key was rejected',
+            errorRateLimit: 'OpenRouter is rate-limiting the request',
+            errorRequest: 'OpenRouter rejected the request',
+            errorServer: 'OpenRouter answered with a server error',
+            errorData: 'OpenRouter answered in an unexpected shape',
+            errorHost: 'the plugin route did not answer',
+            errorUnknown: 'the reason is unknown',
             limitKey: 'API key limit',
             limitBalance: 'Account balance',
             limitLeft: '{left} of {limit} left',
@@ -1392,12 +1693,16 @@ window.__ModuleLoader__.load({
             limitNotice: 'Limit warning',
             limitNoticeOff: 'Off',
             limitNoticeOn: 'On \u2014 warn when a key limit is running out',
-            limitNoticeHint: 'Shows a warning when a tracked key is close to its limit.',
+            limitNoticeHint: 'Off by default. When on, the chip shows the warning state and the panel shows how much of the limit is left.',
             limitToastPeriodLifetime: 'lifetime',
-            limitToastWarn: 'Key "{name}" is at {percent}% of {period}\u2019s {limit} \u2014 ~{estimate} left at this rate.',
-            limitToastCritical: 'Key "{name}" is at {percent}% of {period}\u2019s {limit} \u2014 ~{estimate} left at this rate.',
-            limitToastWarnNoEstimate: 'Key "{name}" is at {percent}% of {period}\u2019s {limit}.',
-            limitToastCriticalNoEstimate: 'Key "{name}" is at {percent}% of {period}\u2019s {limit}.',
+            // The warn and critical copy differ (m9): the toast is the only
+            // limit surface with no room for a marker, so the wording itself
+            // has to carry the level, in the terms the panel and the dot's
+            // aria-label already use.
+            limitToastWarn: 'Key "{name}" is running low: {percent}% of {period}\u2019s {limit} \u2014 ~{estimate} left at this rate.',
+            limitToastCritical: 'Key "{name}" is nearly exhausted: {percent}% of {period}\u2019s {limit} \u2014 ~{estimate} left at this rate.',
+            limitToastWarnNoEstimate: 'Key "{name}" is running low: {percent}% of {period}\u2019s {limit}.',
+            limitToastCriticalNoEstimate: 'Key "{name}" is nearly exhausted: {percent}% of {period}\u2019s {limit}.',
             limitToastDismiss: 'Dismiss',
           },
           zh: {
@@ -1431,6 +1736,20 @@ window.__ModuleLoader__.load({
             clear: '清除',
             reload: '刷新',
             saved: '已保存',
+            refreshFailed: '无法刷新：{reason}',
+            refreshFailedTitle: 'OpenRouter 花费 — 无法刷新：{reason}。{time} 后进行下次尝试。',
+            nextAttemptIn: '{time} 后自动重试',
+            retryNow: '立即重试',
+            retrying: '重试中…',
+            errorNetwork: '无法从本机连接 OpenRouter',
+            errorTimeout: 'OpenRouter 未及时响应',
+            errorAuth: '管理密钥被拒绝',
+            errorRateLimit: 'OpenRouter 正在限制请求频率',
+            errorRequest: 'OpenRouter 拒绝了该请求',
+            errorServer: 'OpenRouter 返回服务器错误',
+            errorData: 'OpenRouter 返回的数据结构异常',
+            errorHost: '插件路由未响应',
+            errorUnknown: '原因未知',
             limitKey: '密钥限额',
             limitBalance: '账户余额',
             limitLeft: '剩余 {left}，共 {limit}',
@@ -1456,10 +1775,10 @@ window.__ModuleLoader__.load({
             limitNoticeOn: '开启 — 密钥限额将耗尽时提醒',
             limitNoticeHint: '默认关闭。开启后芯片显示警示状态，面板显示剩余额度。',
             limitToastPeriodLifetime: '总计',
-            limitToastWarn: '密钥"{name}"已用{period}{limit}的{percent}% — 按此速度约剩{estimate}。',
-            limitToastCritical: '密钥"{name}"已用{period}{limit}的{percent}% — 按此速度约剩{estimate}。',
-            limitToastWarnNoEstimate: '密钥"{name}"已用{period}{limit}的{percent}%。',
-            limitToastCriticalNoEstimate: '密钥"{name}"已用{period}{limit}的{percent}%。',
+            limitToastWarn: '密钥"{name}"限额偏低：已用{period}{limit}的{percent}% — 按此速度约剩{estimate}。',
+            limitToastCritical: '密钥"{name}"限额即将耗尽：已用{period}{limit}的{percent}% — 按此速度约剩{estimate}。',
+            limitToastWarnNoEstimate: '密钥"{name}"限额偏低：已用{period}{limit}的{percent}%。',
+            limitToastCriticalNoEstimate: '密钥"{name}"限额即将耗尽：已用{period}{limit}的{percent}%。',
             limitToastDismiss: '关闭',
           },
           ru: {
@@ -1493,6 +1812,20 @@ window.__ModuleLoader__.load({
             clear: 'Очистить',
             reload: 'Обновить',
             saved: 'Сохранено',
+            refreshFailed: 'Не удалось обновить: {reason}',
+            refreshFailedTitle: 'Расходы OpenRouter — не удалось обновить: {reason}. Следующая попытка через {time}.',
+            nextAttemptIn: 'Следующая попытка через {time}',
+            retryNow: 'Повторить сейчас',
+            retrying: 'Повторяю…',
+            errorNetwork: 'OpenRouter недоступен с этой машины',
+            errorTimeout: 'OpenRouter не ответил вовремя',
+            errorAuth: 'управляющий ключ отклонён',
+            errorRateLimit: 'OpenRouter ограничивает частоту запросов',
+            errorRequest: 'OpenRouter отклонил запрос',
+            errorServer: 'OpenRouter ответил ошибкой сервера',
+            errorData: 'OpenRouter ответил неожиданной структурой',
+            errorHost: 'маршрут плагина не ответил',
+            errorUnknown: 'причина неизвестна',
             limitKey: 'Лимит ключа',
             limitBalance: 'Баланс аккаунта',
             limitLeft: 'Осталось {left} из {limit}',
@@ -1526,10 +1859,10 @@ window.__ModuleLoader__.load({
             limitNoticeOn: 'Включено — предупреждать, когда лимит ключа заканчивается',
             limitNoticeHint: 'По умолчанию выключено. При включении чип показывает предупреждение, а панель — сколько лимита осталось.',
             limitToastPeriodLifetime: 'всего',
-            limitToastWarn: 'Ключ "{name}" израсходовал {percent}% лимита {period} ({limit}) — при таком темпе осталось ~{estimate}.',
-            limitToastCritical: 'Ключ "{name}" израсходовал {percent}% лимита {period} ({limit}) — при таком темпе осталось ~{estimate}.',
-            limitToastWarnNoEstimate: 'Ключ "{name}" израсходовал {percent}% лимита {period} ({limit}).',
-            limitToastCriticalNoEstimate: 'Ключ "{name}" израсходовал {percent}% лимита {period} ({limit}).',
+            limitToastWarn: 'Лимит ключа "{name}" подходит к концу: израсходовано {percent}% лимита {period} ({limit}) — при таком темпе осталось ~{estimate}.',
+            limitToastCritical: 'Лимит ключа "{name}" почти исчерпан: израсходовано {percent}% лимита {period} ({limit}) — при таком темпе осталось ~{estimate}.',
+            limitToastWarnNoEstimate: 'Лимит ключа "{name}" подходит к концу: израсходовано {percent}% лимита {period} ({limit}).',
+            limitToastCriticalNoEstimate: 'Лимит ключа "{name}" почти исчерпан: израсходовано {percent}% лимита {period} ({limit}).',
             limitToastDismiss: 'Закрыть',
           },
         });

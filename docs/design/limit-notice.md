@@ -366,7 +366,7 @@ equivalent that keeps colour from being the sole carrier:
 | `limitNotice` | `Limit warning` | `Предупреждение о лимите` | `限额提醒` |
 | `limitNoticeOff` | `Off` | `Выключено` | `关闭` |
 | `limitNoticeOn` | `On — warn when a key limit is running out` | `Включено — предупреждать, когда лимит ключа заканчивается` | `开启 — 密钥限额将耗尽时提醒` |
-| `limitNoticeHint` | `Shows a warning when a tracked key is close to its limit.` | `По умолчанию выключено. При включении чип показывает предупреждение, а панель — сколько лимита осталось.` | `默认关闭。开启后芯片显示警示状态，面板显示剩余额度。` |
+| `limitNoticeHint` | `Off by default. When on, the chip shows the warning state and the panel shows how much of the limit is left.` | `По умолчанию выключено. При включении чип показывает предупреждение, а панель — сколько лимита осталось.` | `默认关闭。开启后芯片显示警示状态，面板显示剩余额度。` |
 
 The toast. Its copy differs from the popover sentence on purpose: the toast has no meter beside
 it, so the percentage and the cap have to be in the sentence itself. `{name}` is the key name and
@@ -375,10 +375,10 @@ it, so the percentage and the cap have to be in the sentence itself. `{name}` is
 | Key | en | ru | zh |
 |---|---|---|---|
 | `limitToastPeriodLifetime` | `lifetime` | `всего` | `总计` |
-| `limitToastWarn` | `Key "{name}" is at {percent}% of {period}'s {limit} — ~{estimate} left at this rate.` | `Ключ "{name}" израсходовал {percent}% лимита {period} ({limit}) — при таком темпе осталось ~{estimate}.` | `密钥"{name}"已用{period}{limit}的{percent}% — 按此速度约剩{estimate}。` |
-| `limitToastCritical` | `Key "{name}" is at {percent}% of {period}'s {limit} — ~{estimate} left at this rate.` | `Ключ "{name}" израсходовал {percent}% лимита {period} ({limit}) — при таком темпе осталось ~{estimate}.` | `密钥"{name}"已用{period}{limit}的{percent}% — 按此速度约剩{estimate}。` |
-| `limitToastWarnNoEstimate` | `Key "{name}" is at {percent}% of {period}'s {limit}.` | `Ключ "{name}" израсходовал {percent}% лимита {period} ({limit}).` | `密钥"{name}"已用{period}{limit}的{percent}%。` |
-| `limitToastCriticalNoEstimate` | `Key "{name}" is at {percent}% of {period}'s {limit}.` | `Ключ "{name}" израсходовал {percent}% лимита {period} ({limit}).` | `密钥"{name}"已用{period}{limit}的{percent}%。` |
+| `limitToastWarn` | `Key "{name}" is running low: {percent}% of {period}'s {limit} — ~{estimate} left at this rate.` | `Лимит ключа "{name}" подходит к концу: израсходовано {percent}% лимита {period} ({limit}) — при таком темпе осталось ~{estimate}.` | `密钥"{name}"限额偏低：已用{period}{limit}的{percent}% — 按此速度约剩{estimate}。` |
+| `limitToastCritical` | `Key "{name}" is nearly exhausted: {percent}% of {period}'s {limit} — ~{estimate} left at this rate.` | `Лимит ключа "{name}" почти исчерпан: израсходовано {percent}% лимита {period} ({limit}) — при таком темпе осталось ~{estimate}.` | `密钥"{name}"限额即将耗尽：已用{period}{limit}的{percent}% — 按此速度约剩{estimate}。` |
+| `limitToastWarnNoEstimate` | `Key "{name}" is running low: {percent}% of {period}'s {limit}.` | `Лимит ключа "{name}" подходит к концу: израсходовано {percent}% лимита {period} ({limit}).` | `密钥"{name}"限额偏低：已用{period}{limit}的{percent}%。` |
+| `limitToastCriticalNoEstimate` | `Key "{name}" is nearly exhausted: {percent}% of {period}'s {limit}.` | `Лимит ключа "{name}" почти исчерпан: израсходовано {percent}% лимита {period} ({limit}).` | `密钥"{name}"限额即将耗尽：已用{period}{limit}的{percent}%。` |
 | `limitToastDismiss` | `Dismiss` | `Закрыть` | `关闭` |
 
 The `*NoEstimate` pair exists because a failed hourly read leaves no runway to name (§5 of
