@@ -1,4 +1,4 @@
-# Git hooks configuration for translation consistency checks
+# Git hooks configuration for translation consistency and repository guards
 # Managed by lefthook: https://github.com/evilmartians/lefthook
 
 pre-commit:
@@ -12,3 +12,5 @@ pre-push:
   commands:
     translation-sync:
       run: node scripts/verify-translation-sync.mjs
+    repo-guard:
+      run: node --test tests/repo-guard.test.mjs
