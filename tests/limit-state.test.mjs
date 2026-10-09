@@ -905,3 +905,134 @@ test('the two summary pollers share one request inside the coalescing window', a
   await flush();
   assert.equal(third.counters.fetch, 1, 'a caller inside the window must reuse the reply');
 });
+
+/** One dictionary block, found by brace matching from its opening line. */
+function dictBlock(openIndex) {
+  let depth = 0;
+  let started = false;
+  let out = '';
+  for (let i = openIndex; i < source.length; i += 1) {
+    const ch = source[i];
+    out += ch;
+    if (ch === '{') { depth += 1; started = true; } else if (ch === '}') { depth -= 1; }
+    if (started && depth === 0) break;
+  }
+  return out;
+}
+
+const unescapeUnicode = value => value.replace(/\\u([0-9a-fA-F]{4})/g, (m, hex) => String.fromCharCode(parseInt(hex, 16)));
+
+/** `name: 'template',` pairs from a dictionary block, first occurrence wins. */
+function parseDict(block) {
+  const out = {};
+  for (const m of block.matchAll(/^\s+(\w+):\s*'((?:[^'\\]|\\.)*)',\s*$/gm)) {
+    if (!(m[1] in out)) out[m[1]] = unescapeUnicode(m[2]);
+  }
+  return out;
+}
+
+const dicts = {
+  en: parseDict(dictBlock(source.indexOf('\n          en: {') + 1)),
+  zh: parseDict(dictBlock(source.indexOf('\n          zh: {') + 1)),
+  ru: parseDict(dictBlock(source.indexOf('\n          ru: {') + 1)),
+};
+
+const designDoc = readFileSync(join(here, '..', 'docs', 'design', 'limit-notice.md'), 'utf8');
+
+/** Rows of the `| Key | en | ru | zh |` tables, as key -> {en, ru, zh}. */
+function docRows() {
+  const rows = new Map();
+  const lines = designDoc.split('\n');
+  for (let i = 0; i < lines.length; i += 1) {
+    const line = lines[i];
+    if (!line.startsWith('|')) continue;
+    // Split on the cell separator rather than matching a fixed pattern: a cell
+    // may itself contain backticks (the `other`-only marker) or an em dash.
+    const cells = line.split('|').slice(1, -1).map(cell => cell.trim());
+    if (cells.length !== 4 || cells[0] !== 'Key') continue;
+    // This is a locale table: `| Key | en | ru | zh |`. Read until the table
+    // ends, so other four-column tables in the document are not swept in.
+    for (let j = i + 2; j < lines.length && lines[j].startsWith('|'); j += 1) {
+      const row = lines[j].split('|').slice(1, -1).map(cell => cell.trim());
+      if (row.length !== 4) continue;
+      const key = row[0].match(/^`(\w+)`$/);
+      if (key === null) continue;
+      rows.set(key[1], {
+        en: normaliseQuotes(stripBackticks(row[1])),
+        ru: normaliseQuotes(stripBackticks(row[2])),
+        zh: normaliseQuotes(stripBackticks(row[3])),
+      });
+    }
+  }
+  return rows;
+}
+
+/** A quoted cell is wrapped in single backticks; a marker cell is not. */
+function stripBackticks(cell) {
+  const m = cell.match(/^`([\s\S]*)`$/);
+  return m === null ? cell : m[1];
+}
+
+/**
+ * A markdown cell cannot express the typographic apostrophe the dictionaries
+ * use without the reader seeing an escape, so the doc writes a plain `'`. Both
+ * sides are folded to one character before comparing.
+ */
+function normaliseQuotes(value) {
+  return value.replace(/[\u2018\u2019]/g, "'");
+}
+
+test('the design doc documents every key the limit feature ships', () => {
+  // The doc is the only place a translator or a reviewer can see the whole
+  // vocabulary at once, and it had fallen behind: 17 keys the feature ships —
+  // the toast copy, the Settings toggle, the level names, the plural forms —
+  // appeared in no table at all. A missing row is invisible by nature, so the
+  // check has to be mechanical rather than a reading.
+  //
+  // Checked against the union of the three dictionaries, not English alone: a
+  // category-suffixed key may exist in one language only (`_few` is Russian's,
+  // and English rightly does not define it).
+  const union = new Set([...Object.keys(dicts.en), ...Object.keys(dicts.zh), ...Object.keys(dicts.ru)]);
+  const rows = docRows();
+  const missing = [...union]
+    .filter(key => /^(limit|period)/.test(key) && !rows.has(key))
+    .sort();
+  assert.deepEqual(missing, [], 'every limit-feature key must have a row in the doc table');
+});
+
+test('the design doc quotes the strings that actually ship', () => {
+  // The table is a transcription, so it can drift by a word without anyone
+  // noticing — and it did: four rows disagreed with the code, and one of them
+  // (`limitUsedPeriod`) named a key that has never existed in any commit.
+  // Compared per language, because a row can be right in English and wrong in
+  // Russian, which is exactly how the dropped numerals survived.
+  const rows = docRows();
+  const mismatches = [];
+  for (const [key, quoted] of rows) {
+    for (const lang of ['en', 'ru', 'zh']) {
+      const shipped = dicts[lang][key];
+      if (shipped === undefined) {
+        // A language may legitimately not define a category, but then the doc
+        // has to say so rather than quoting a translation that is not shipped.
+        if (!/none|other/.test(quoted[lang])) {
+          mismatches.push(`${key} [${lang}]\n      doc quotes a string, code defines none`);
+        }
+        continue;
+      }
+      if (normaliseQuotes(quoted[lang]) === normaliseQuotes(shipped)) continue;
+      mismatches.push(`${key} [${lang}]\n      doc:  ${quoted[lang]}\n      code: ${shipped}`);
+    }
+  }
+  assert.deepEqual(mismatches, [], 'the doc must quote the shipped strings verbatim');
+});
+
+test('every key the design doc names exists in the code', () => {
+  // The other direction. `limitUsedPeriod` was documented for months and had
+  // never been in any commit, so a reader could look for a string that does not
+  // exist, or "fix" the code to match a key that was never meant to ship.
+  // Any language counts: a Russian-only `_few` form is still a shipped key.
+  const union = new Set([...Object.keys(dicts.en), ...Object.keys(dicts.zh), ...Object.keys(dicts.ru)]);
+  const rows = docRows();
+  const absent = [...rows.keys()].filter(key => !union.has(key)).sort();
+  assert.deepEqual(absent, [], 'a documented key must exist in the shipped dictionary');
+});

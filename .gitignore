@@ -7,3 +7,8 @@ node_modules/
 # Scratch handoff notes for a session in progress; never ship.
 HANDOFF.local.md
 *.local.md
+
+# Scratch from local browser probes — screenshots never get committed.
+.playwright-mcp/
+/dot-*.png
+*.probe.png

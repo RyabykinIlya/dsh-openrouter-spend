@@ -343,6 +343,47 @@ New keys, with the form the Russian and Chinese blocks should take:
 | `limitTightest_one` | `Tightest of {count} limited key` | `Самый жёсткий из {count} ключа с лимитом` | *(none — only `other`)* |
 | `limitUnavailable` | `Key limits unavailable: {reason}` | `Лимиты ключей недоступны: {reason}` | `无法获取密钥限额：{reason}` |
 | `limitUnknownMatch` | `Limit unknown: this key's name did not match the account's key list.` | `Лимит неизвестен: имя ключа не совпало со списком ключей аккаунта.` | `限额未知：该密钥名称未匹配到账户密钥列表。` |
+| `limitBurnUnavailable` | `the pace of spend is unknown: {reason}` | `темп расхода неизвестен: {reason}` | `无法确定消耗速度：{reason}` |
+
+Plural forms. The base key is the fallback form and is present in all three languages; a
+language adds suffixed keys for the CLDR categories it actually distinguishes. Chinese has only
+`other`, so it adds none — hence the *(none)* cells, which are **not** a translation gap:
+
+| Key | en | ru | zh |
+|---|---|---|---|
+| `limitApproxRequests_one` | `≈ {count} request` | `≈ {count} запрос` | *(none — only `other`)* |
+| `limitApproxRequests_few` | *(none — `other` covers it)* | `≈ {count} запроса` | *(none — only `other`)* |
+| `limitDaysAtRate_one` | `~{days} day at this rate` | `~{days} день при таком темпе` | *(none — only `other`)* |
+| `limitDaysAtRate_few` | *(none — `other` covers it)* | `~{days} дня при таком темпе` | *(none — only `other`)* |
+
+Level names and the Settings toggle. The level names are the dot's `aria-label` — the text
+equivalent that keeps colour from being the sole carrier:
+
+| Key | en | ru | zh |
+|---|---|---|---|
+| `limitLevelWarn` | `Limit is running low` | `Лимит подходит к концу` | `限额偏低` |
+| `limitLevelCritical` | `Limit is nearly exhausted` | `Лимит почти исчерпан` | `限额即将耗尽` |
+| `limitNotice` | `Limit warning` | `Предупреждение о лимите` | `限额提醒` |
+| `limitNoticeOff` | `Off` | `Выключено` | `关闭` |
+| `limitNoticeOn` | `On — warn when a key limit is running out` | `Включено — предупреждать, когда лимит ключа заканчивается` | `开启 — 密钥限额将耗尽时提醒` |
+| `limitNoticeHint` | `Shows a warning when a tracked key is close to its limit.` | `По умолчанию выключено. При включении чип показывает предупреждение, а панель — сколько лимита осталось.` | `默认关闭。开启后芯片显示警示状态，面板显示剩余额度。` |
+
+The toast. Its copy differs from the popover sentence on purpose: the toast has no meter beside
+it, so the percentage and the cap have to be in the sentence itself. `{name}` is the key name and
+`{estimate}` a rendered duration, both formatted at render rather than translated:
+
+| Key | en | ru | zh |
+|---|---|---|---|
+| `limitToastPeriodLifetime` | `lifetime` | `всего` | `总计` |
+| `limitToastWarn` | `Key "{name}" is at {percent}% of {period}'s {limit} — ~{estimate} left at this rate.` | `Ключ "{name}" израсходовал {percent}% лимита {period} ({limit}) — при таком темпе осталось ~{estimate}.` | `密钥"{name}"已用{period}{limit}的{percent}% — 按此速度约剩{estimate}。` |
+| `limitToastCritical` | `Key "{name}" is at {percent}% of {period}'s {limit} — ~{estimate} left at this rate.` | `Ключ "{name}" израсходовал {percent}% лимита {period} ({limit}) — при таком темпе осталось ~{estimate}.` | `密钥"{name}"已用{period}{limit}的{percent}% — 按此速度约剩{estimate}。` |
+| `limitToastWarnNoEstimate` | `Key "{name}" is at {percent}% of {period}'s {limit}.` | `Ключ "{name}" израсходовал {percent}% лимита {period} ({limit}).` | `密钥"{name}"已用{period}{limit}的{percent}%。` |
+| `limitToastCriticalNoEstimate` | `Key "{name}" is at {percent}% of {period}'s {limit}.` | `Ключ "{name}" израсходовал {percent}% лимита {period} ({limit}).` | `密钥"{name}"已用{period}{limit}的{percent}%。` |
+| `limitToastDismiss` | `Dismiss` | `Закрыть` | `关闭` |
+
+The `*NoEstimate` pair exists because a failed hourly read leaves no runway to name (§5 of
+HANDOFF): the toast still fires on the level change but drops the estimate rather than
+inventing one.
 
 `{when}` in `limitResets` is a **rendered local time** (`03:00`), formatted at render, not a
 translated word — there is no `resets at midnight` string, because the boundary is UTC
@@ -408,6 +449,33 @@ delivery surface with its own cost, so it is specified but not required by this 
   already an alert.
 * Motion respects `prefers-reduced-motion`, and every animated signal has a static colour
   and a text equivalent.
+
+### Motion and colour, measured
+
+The two claims above — motion is finite and optional, colour separates the levels — were checked
+in a real browser on 2026-10-09 rather than read off the stylesheet: the plugin's CSS was
+extracted from `client.js`, rendered against the running GUI's own theme tokens in Chromium
+(Playwright), and the computed values recorded:
+
+| State | Light | Dark | Computed animation |
+|---|---|---|---|
+| `ok` | `rgb(65,118,230)` | `rgb(122,170,255)` | `none` |
+| `loading` | `rgb(129,133,140)` | `rgb(173,178,184)` | `none` |
+| `stale` | `rgb(245,158,11)` | `rgb(245,158,11)` | `none` |
+| `error`, `no-credential` | `rgb(236,19,19)` | `rgb(242,90,90)` | `none` |
+| `limit-warn` | `rgb(245,158,11)` | `rgb(245,158,11)` | `ors-pulse 1.6s ease-in-out 2 forwards` |
+| `limit-critical` | `rgb(236,19,19)` | `rgb(242,90,90)` | `ors-pulse 1.6s ease-in-out 3 forwards` |
+
+With `prefers-reduced-motion: reduce` emulated, both limit dots compute
+`animation-name: none` / `animation-duration: 0s` **while keeping their colour** — the level
+stays readable without motion, which is what "static colour" above promises. Switching back to
+`no-preference` restores the pulse.
+
+The committed check is `tests/dot-appearance.test.mjs`: it applies this stylesheet's own cascade
+— specificity, document order, the `@media` guard — and asserts the same outcome, so a rule that
+is reordered, a `forwards` that is dropped, or a state colour that escapes its guard fails
+`npm test` without needing a browser. What it cannot do is prove the theme tokens resolve to
+these hex values; that needs the GUI, and was measured once here.
 
 ## What this design does not do
 
