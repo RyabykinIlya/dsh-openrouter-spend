@@ -42,7 +42,7 @@ function load() {
 }
 
 const api = load();
-const { limitState, limitSentence, pluralCategory, tPlural, withBurnNote, dotState, escalates, fmtDuration, nextResetMs, resetTextFor, median, peakHourlyBurn, closedDayTotals } = api;
+const { limitState, limitSentence, pluralCategory, tPlural, withBurnNote, dotState, escalates, toastPeriodKey, periodStartKey, seenLimitKey, fmtDuration, nextResetMs, resetTextFor, median, peakHourlyBurn, windowedBurn, closedDayTotals } = api;
 
 /** Burn buckets for `closedDayTotals`: `days` full UTC days ending before `nowMs`. */
 function burnFor(nowMs, perDay, days) {
@@ -413,12 +413,15 @@ test('the shipped Russian forms all carry the numeral, and select correctly', ()
   // restoring the old numeral-dropping ru strings left every mechanism test
   // green, so nothing here was pinning the shipped copy. The gap mattered: the
   // old strings silently discarded the count the other two languages show.
-  const ru = source.slice(source.indexOf('\n          ru: {'), source.indexOf('\n          ru: {') + 4000);
-  const en = source.slice(source.indexOf('\n          en: {'), source.indexOf('\n          zh: {'));
-  const grab = (block, key) => {
-    const match = block.match(new RegExp(`^\\s+${key}: '((?:[^'\\\\]|\\\\.)*)',`, 'm'));
-    return match === null ? undefined : match[1];
-  };
+  // The SHIPPED copy, read through the shared brace-matched extractor that
+  // builds `dicts` — not a fixed 4000-char slice of the source and a
+  // 10-space indentation pattern (N13). A reformat of client.js must not
+  // silently hand this test a window into the wrong block; `dictBlock` finds
+  // the block by name and matches braces, so the lookup below can only ever
+  // miss by the key being genuinely absent.
+  const ru = dicts.ru;
+  const en = dicts.en;
+  const grab = (dict, key) => dict[key];
 
   // Both counted keys must interpolate their numeral in Russian. `{count}` and
   // `{days}` are what a dropped numeral loses; a string without it cannot show
@@ -445,7 +448,7 @@ test('the shipped Russian forms all carry the numeral, and select correctly', ()
   // deliberately ships no suffix keys.
   assert.ok(grab(en, 'limitApproxRequests_one').includes('{count}'));
   assert.ok(grab(en, 'limitDaysAtRate_one').includes('{days}'));
-  assert.equal(grab(source.slice(source.indexOf('\n          zh: {'), source.indexOf('\n          ru: {')), 'limitApproxRequests_one'), undefined);
+  assert.equal(grab(dicts.zh, 'limitApproxRequests_one'), undefined);
 
   // End to end with the SHIPPED Russian strings and the real selector, not a
   // fixture: 1 request must take the one form, 5 the many form.
@@ -575,6 +578,63 @@ test('the tightest-key label names how many limits it compared', async () => {
   const text = textOf(tree).join(' | ');
   assert.ok(/Tightest of 2 limited keys/.test(text), `the label must name the count: ${text}`);
   assert.ok(text.includes('batch-key') || text.includes('build-bot'), `a key must be named: ${text}`);
+});
+
+/** Mount the chip, let the poll land, open the popover: the rendered panel. */
+async function openPanel(stand) {
+  const pill = stand.mount('conversation.composer.dock', {});
+  let tree = pill.render();
+  for (let i = 0; i < 6; i += 1) { await flush(); if (pill.dirty) tree = pill.render(); }
+  const chip = findByClass(tree, 'ors-chip');
+  assert.ok(chip?.props?.onClick, 'the chip must be there to open the popover');
+  chip.props.onClick();
+  for (let i = 0; i < 6; i += 1) { await flush(); if (pill.dirty) tree = pill.render(); }
+  return tree;
+}
+
+test('a key with spend but no matching limit is surfaced as unmatched', async () => {
+  // N4: ADR-0002's Confirmation claims a test for exactly this. The join is
+  // by NAME and is the decision's stated risk, so the failure it must never
+  // have is silence: a key that spent money with no readable cap has to SAY
+  // the cap is unknown, not render a healthy-looking block or nothing at all.
+  // `limits` is the management `/keys` answer — a name the host could not
+  // match simply has no row in it — while `byKey` carries the spend.
+  const stand = loadWithFetch(unmatchedPayload(), Date.UTC(2026, 9, 9, 12, 0, 0), {
+    'ors.limitNotice': '1',
+    'ors.keyId': 'build-bot',
+  });
+  const tree = await openPanel(stand);
+  const quota = findByClass(tree, 'ors-quota');
+  assert.ok(quota, 'the limit block must render');
+  assert.equal(quota.props['data-level'], 'unknown',
+    `the unmatched join must take the unknown state — got ${quota.props['data-level']}`);
+  const note = textOf(findByClass(quota, 'ors-quota-note')).join('');
+  assert.equal(note, dicts.en.limitUnknownMatch,
+    `the reader must be told the limit is unknown — got ${note}`);
+
+  // The contrast that makes the assertion mean something: a JOINED row takes
+  // the ordinary limit block instead, and a row with no spend at all says
+  // nothing — so the sentence above is produced by the unmatched join and by
+  // nothing else.
+  const joined = loadWithFetch(
+    unmatchedPayload({ limits: { 'build-bot': { limit: 12, limitRemaining: 4.8, limitReset: 'daily', disabled: false } } }),
+    Date.UTC(2026, 9, 9, 12, 0, 0),
+    { 'ors.limitNotice': '1', 'ors.keyId': 'build-bot' },
+  );
+  const joinedTree = await openPanel(joined);
+  const joinedText = textOf(joinedTree).join(' | ');
+  assert.ok(!joinedText.includes('Limit unknown'), `a joined key must not claim to be unmatched: ${joinedText}`);
+  assert.match(joinedText, /\$4\.80 of \$12\.00 left/, 'a joined key shows its limit sentence');
+  assert.equal(findByClass(joinedTree, 'ors-quota').props['data-level'], 'warn');
+
+  const still = loadWithFetch(unmatchedPayload({ usd: 0 }), Date.UTC(2026, 9, 9, 12, 0, 0), {
+    'ors.limitNotice': '1',
+    'ors.keyId': 'build-bot',
+  });
+  const stillTree = await openPanel(still);
+  assert.equal(findByClass(stillTree, 'ors-quota'), undefined,
+    'a key that spent nothing has no limit to report');
+  assert.ok(!textOf(stillTree).join(' | ').includes('Limit unknown'));
 });
 
 test('pluralCategory reads the CLDR category, and refuses to guess', () => {
@@ -738,12 +798,30 @@ function loadWithFetch(payload, startMs, prefs = { 'ors.limitNotice': '1', 'ors.
     constructor(...args) { if (args.length === 0) super(now); else super(...args); }
     static now() { return now; }
   }
+  // The pref bus works, not just exists: `writePref` dispatches `ors:prefs`
+  // and the components re-read the store on it, which is what lets a test
+  // switch the tracked key mid-flight the way Settings does. Writes are
+  // RECORDED, not dropped: a dismissal is only observable as the seen key it
+  // writes (m21), and dispatched events are logged so the toast's "open the
+  // popover" action can be asserted rather than assumed.
+  const listeners = new Map();
+  const writes = [];
+  const events = [];
   const windowStub = {
     __ModuleLoader__: { load: () => {} },
-    localStorage: { getItem: key => (key in store ? store[key] : null), setItem: () => {} },
-    addEventListener: () => {},
-    removeEventListener: () => {},
-    dispatchEvent: () => {},
+    localStorage: {
+      getItem: key => (key in store ? store[key] : null),
+      setItem: (key, value) => { store[key] = value; writes.push({ key, value }); },
+    },
+    addEventListener: (type, handler) => {
+      if (!listeners.has(type)) listeners.set(type, new Set());
+      listeners.get(type).add(handler);
+    },
+    removeEventListener: (type, handler) => { listeners.get(type)?.delete(handler); },
+    dispatchEvent: event => {
+      events.push(event.type);
+      for (const handler of listeners.get(event.type) ?? []) handler(event);
+    },
   };
   let captured;
   windowStub.__ModuleLoader__.load = registration => { captured = registration; };
@@ -756,6 +834,11 @@ function loadWithFetch(payload, startMs, prefs = { 'ors.limitNotice': '1', 'ors.
     },
     setInterval: () => 0,
     clearInterval: () => {},
+    // The poll arms its next tick with `setTimeout`. The stub fires it at once,
+    // which is what "the mount effect ran" means under this fake React; the
+    // scheduled delay itself is covered by the pure `nextPollMs` tests.
+    setTimeout: fn => { fn(); return 0; },
+    clearTimeout: () => {},
     CustomEvent: class { constructor(type) { this.type = type; } },
     Date: FakeDate,
     console,
@@ -826,7 +909,10 @@ function loadWithFetch(payload, startMs, prefs = { 'ors.limitNotice': '1', 'ors.
     };
     return instance;
   };
-  return { counters, mount, advance: ms => { now += ms; }, api, slots };
+  return {
+    counters, mount, advance: ms => { now += ms; }, api, slots, writes, events,
+    setPref: (name, value) => { store[name] = value; windowStub.dispatchEvent({ type: 'ors:prefs' }); },
+  };
 }
 
 /** The first node carrying `className`, so a test can click what it renders. */
@@ -841,6 +927,18 @@ function findByClass(node, className) {
   return findByClass(node.children, className);
 }
 
+/** The first host element with `tag`, for controls that carry no class (a
+ * bare `<button>`), where `findByClass` has nothing to hold on to. */
+function findByTag(node, tag) {
+  if (node === null || node === undefined || typeof node !== 'object') return undefined;
+  if (Array.isArray(node)) {
+    for (const child of node) { const hit = findByTag(child, tag); if (hit !== undefined) return hit; }
+    return undefined;
+  }
+  if (node.type === tag) return node;
+  return findByTag(node.children, tag);
+}
+
 /** Every text node under a tree, skipping the CSS the components inline. */
 function textOf(node, out = []) {
   if (node === null || node === undefined || node === false) return out;
@@ -849,6 +947,15 @@ function textOf(node, out = []) {
   if (node.type === 'style') return out;
   if (node.children) textOf(node.children, out);
   return out;
+}
+
+/**
+ * `ToastOverlay` returns the Toast as a component element (`h(Toast, props)`);
+ * this fake React builds elements but never runs component types, so a test
+ * that wants the toast's words expands it by one level itself.
+ */
+function expandComponent(node) {
+  return typeof node?.type === 'function' ? node.type(node.props) : node;
 }
 
 const flush = () => new Promise(resolve => { setTimeout(resolve, 0); });
@@ -906,18 +1013,371 @@ test('the two summary pollers share one request inside the coalescing window', a
   assert.equal(third.counters.fetch, 1, 'a caller inside the window must reuse the reply');
 });
 
-/** One dictionary block, found by brace matching from its opening line. */
-function dictBlock(openIndex) {
-  let depth = 0;
-  let started = false;
-  let out = '';
-  for (let i = openIndex; i < source.length; i += 1) {
-    const ch = source[i];
-    out += ch;
-    if (ch === '{') { depth += 1; started = true; } else if (ch === '}') { depth -= 1; }
-    if (started && depth === 0) break;
+/** A payload where `build-bot` sits at 60% of a daily cap: a clean warn. */
+function warnPayload() {
+  return {
+    status: 'ok', refreshedAt: '2026-10-09T09:00:00.000Z', refreshSeconds: 60,
+    todaySpend: { usd: 2.15, requests: 47 }, last7: { usd: 9, requests: 100 },
+    last30: { usd: 20, requests: 400 }, byDay: [], byModel: [],
+    byKey: [{ id: 'build-bot', todayUsd: 2.15, todayRequests: 47, todayModels: [], last7: { usd: 9, requests: 100 }, last30: { usd: 20, requests: 400 } }],
+    limits: { 'build-bot': { limit: 12, limitRemaining: 4.8, limitReset: 'daily', disabled: false } },
+    limitThresholds: { warn: 0.4, critical: 0.8 },
+    burnHourly: { 'build-bot': [{ ts: '2026-10-09T08:00:00', usd: 0.5 }] },
+    credits: { totalCredits: 1000, totalUsage: 96.75 },
+  };
+}
+
+/**
+ * A payload whose `byKey` row carries spend but whose `limits` map has no
+ * entry for it: the two halves of the name join disagree. `limits` IS the
+ * management `/keys` answer — a name the host could not match simply has no
+ * row there — so `usd` is the window total the host's `byKey` emits, the
+ * figure `limitUnknown` tests against.
+ */
+function unmatchedPayload({ usd = 2.15, limits = {} } = {}) {
+  return {
+    status: 'ok', refreshedAt: '2026-10-09T09:00:00.000Z', refreshSeconds: 60,
+    todaySpend: { usd: 2.15, requests: 47 }, last7: { usd: 9, requests: 100 },
+    last30: { usd: 20, requests: 400 }, byDay: [], byModel: [],
+    byKey: [{
+      id: 'build-bot', usd, requests: 47,
+      todayUsd: usd, todayRequests: 47, todayModels: [],
+      last7: { usd: 9, requests: 100 }, last30: { usd: 20, requests: 400 },
+    }],
+    limits,
+    limitThresholds: { warn: 0.4, critical: 0.8 },
+    burnHourly: {},
+    credits: { totalCredits: 1000, totalUsage: 96.75 },
+  };
+}
+
+test('limitState carries the reset period, and the toast names it', () => {
+  // M1: the Toast reads `state.limitReset` to choose between today / this
+  // week / this month / lifetime, but `limitState` never returned the field,
+  // so every periodic-cap toast introduced the cap as "lifetime". The raw
+  // value rides along and the phrase follows it.
+  for (const [limitReset, key] of [['daily', 'periodToday'], ['weekly', 'periodWeek'], ['monthly', 'periodMonth']]) {
+    const state = limitState({ limit: 100, limitRemaining: 58, limitReset, burn: [], nowMs: NOW });
+    assert.equal(state.limitReset, limitReset, `${limitReset} must survive limitState`);
+    assert.equal(toastPeriodKey(state), key, `${limitReset} must name its own period`);
   }
-  return out;
+  const lifetime = limitState({ limit: 100, limitRemaining: 70, limitReset: null, burn: burnFor(NOW, 30, 5), nowMs: NOW });
+  assert.equal(lifetime.limitReset, null);
+  assert.equal(lifetime.lifetime, true);
+  assert.equal(toastPeriodKey(lifetime), 'limitToastPeriodLifetime');
+  // An unrecognised reset value is a lifetime by the same fall-through the
+  // Toast has always had; it must not crash the phrase.
+  assert.equal(toastPeriodKey({ limitReset: 'yearly' }), 'limitToastPeriodLifetime');
+});
+
+test('the seen limit turns with the period, so a dismissal re-arms', () => {
+  // M2: the stored key is `${keyId}:${level}:${periodStart}` — the design
+  // doc's "Retirement — seen" contract. Each anchor is the UTC midnight the
+  // matching budget refills on, so the key turns exactly when the budget
+  // does and yesterday's dismissal cannot silence today's escalation.
+  const tuesday = Date.UTC(2026, 9, 6, 12, 0, 0);
+  const wednesday = Date.UTC(2026, 9, 7, 12, 0, 0);
+  assert.equal(periodStartKey('daily', tuesday), '2026-10-06');
+  assert.equal(periodStartKey('daily', Date.UTC(2026, 9, 6, 23, 59, 59)), '2026-10-06');
+  assert.equal(periodStartKey('daily', Date.UTC(2026, 9, 7, 0, 0, 0)), '2026-10-07', 'the day turns at UTC midnight, where the budget refills');
+  // The ISO week turns on Monday 00:00 UTC: Sunday Oct 11 is W41, Monday
+  // Oct 12 is W42 — the same boundary `nextResetMs('weekly')` refills on.
+  assert.equal(periodStartKey('weekly', Date.UTC(2026, 9, 11, 23, 59, 59)), '2026-W41');
+  assert.equal(periodStartKey('weekly', Date.UTC(2026, 9, 12, 0, 0, 0)), '2026-W42');
+  // A week straddling New Year belongs to the ISO year of its Thursday.
+  assert.equal(periodStartKey('weekly', Date.UTC(2025, 11, 29, 12)), '2026-W01');
+  assert.equal(periodStartKey('weekly', Date.UTC(2027, 0, 1, 12)), '2026-W53');
+  assert.equal(periodStartKey('monthly', Date.UTC(2026, 9, 31, 23)), '2026-10');
+  assert.equal(periodStartKey('monthly', Date.UTC(2026, 10, 1, 0)), '2026-11');
+  // A lifetime cap never re-arms: seen once, quiet for good — the doc's trade.
+  assert.equal(periodStartKey(null, tuesday), 'ever');
+  assert.equal(periodStartKey(undefined, wednesday), 'ever');
+  // The full key: yesterday's stored dismissal must not match today's.
+  assert.equal(seenLimitKey('build-bot', 'warn', 'daily', tuesday), 'build-bot:warn:2026-10-06');
+  assert.notEqual(seenLimitKey('build-bot', 'warn', 'daily', tuesday), seenLimitKey('build-bot', 'warn', 'daily', wednesday),
+    'a new period must re-arm the toast');
+});
+
+test('a warn escalation fires again the period after it was seen, and names the period', async () => {
+  // M1 + M2 through the real overlay: the toast must appear although the
+  // level was seen — yesterday (the budget is new today) — and its message
+  // must say "today", not "lifetime".
+  const stand = loadWithFetch(warnPayload(), Date.UTC(2026, 9, 9, 12, 0, 0), {
+    'ors.limitNotice': '1',
+    'ors.keyId': 'build-bot',
+    'ors.seenLimit': 'build-bot:warn:2026-10-08',
+  });
+  const toast = stand.mount('shell.overlay', {});
+  toast.render();
+  let tree = null;
+  for (let i = 0; i < 6; i += 1) { await flush(); if (toast.dirty) tree = toast.render(); }
+  const text = textOf(expandComponent(tree)).join(' | ');
+  assert.ok(text.includes('build-bot'), `the toast must name the key: ${text}`);
+  assert.ok(text.includes('today'), `a daily cap must name the day, not "lifetime": ${text}`);
+  assert.ok(!text.includes('lifetime'), `a daily cap is not a lifetime: ${text}`);
+  assert.ok(text.includes('running low'), `the warn copy must carry the level (m9): ${text}`);
+});
+
+test('a seen escalation inside the same period stays quiet', async () => {
+  // The other half of M2: the period in the key is what suppresses the
+  // repeat, so today's seen key must still silence today's escalation.
+  const stand = loadWithFetch(warnPayload(), Date.UTC(2026, 9, 9, 12, 0, 0), {
+    'ors.limitNotice': '1',
+    'ors.keyId': 'build-bot',
+    'ors.seenLimit': 'build-bot:warn:2026-10-09',
+  });
+  const toast = stand.mount('shell.overlay', {});
+  toast.render();
+  let tree = null;
+  for (let i = 0; i < 6; i += 1) { await flush(); if (toast.dirty) tree = toast.render(); }
+  // The lookup goes through `expandComponent`: `ToastOverlay` returns the
+  // Toast as a component element, which carries no `ors-toast` class of its
+  // own — a `findByClass` on the unexpanded element returns `undefined`
+  // whether or not a toast is showing, so it could never fail.
+  assert.equal(findByClass(expandComponent(tree), 'ors-toast'), undefined,
+    'a seen escalation must not re-toast inside its period');
+});
+
+test('switching the tracked key resets the escalation history', async () => {
+  // m10: the previous-level ref used to survive a key switch, so a critical
+  // key followed by a warn key never fired the warn — the old key's history
+  // decided the new key's toast. The history is scoped to the key now, and
+  // the toast retires with the key it escalated on.
+  const payload = warnPayload();
+  payload.byKey.push({ id: 'hot-key', todayUsd: 1, todayRequests: 20, todayModels: [], last7: { usd: 5, requests: 50 }, last30: { usd: 9, requests: 90 } });
+  payload.limits['hot-key'] = { limit: 10, limitRemaining: 1, limitReset: 'daily', disabled: false }; // 90%: critical
+  payload.limits['build-bot'] = { limit: 12, limitRemaining: 4.8, limitReset: 'daily', disabled: false }; // 60%: warn
+  payload.burnHourly['hot-key'] = [{ ts: '2026-10-09T08:00:00', usd: 0.5 }];
+  const stand = loadWithFetch(payload, Date.UTC(2026, 9, 9, 12, 0, 0), {
+    'ors.limitNotice': '1',
+    'ors.keyId': 'hot-key',
+  });
+  const toast = stand.mount('shell.overlay', {});
+  toast.render();
+  let tree = null;
+  for (let i = 0; i < 6; i += 1) { await flush(); if (toast.dirty) tree = toast.render(); }
+  let text = textOf(expandComponent(tree)).join(' | ');
+  assert.ok(text.includes('hot-key'), `the critical key must toast: ${text}`);
+  assert.ok(text.includes('nearly exhausted'), `the critical copy must carry the level (m9): ${text}`);
+
+  // Switch to the milder key, the way Settings would: its warn must fire on
+  // its own history, not on the critical key's.
+  stand.setPref('ors.keyId', 'build-bot');
+  for (let i = 0; i < 6; i += 1) { await flush(); if (toast.dirty) tree = toast.render(); }
+  text = textOf(expandComponent(tree)).join(' | ');
+  assert.ok(text.includes('build-bot'), `the new key's toast must fire: ${text}`);
+  assert.ok(text.includes('running low'), `a warn must not inherit critical's silence or copy: ${text}`);
+  assert.ok(!text.includes('nearly exhausted'), `the old key's escalation must not outlive the switch: ${text}`);
+});
+
+test('the toast overlay shows the escalation, and dismissing it retires it', async () => {
+  // m21: only the pure `escalates()` was pinned, so the RENDER path could
+  // drop the toast without a test noticing. This drives `ToastOverlay`
+  // itself: the escalation must ARRIVE as a toast, and the dismiss button
+  // must retire it and record the level as seen in the period it fired in —
+  // the write (M2's key) that keeps it retired for the rest of that period.
+  const stand = loadWithFetch(warnPayload(), Date.UTC(2026, 9, 9, 12, 0, 0), {
+    'ors.limitNotice': '1',
+    'ors.keyId': 'build-bot',
+  });
+  const toast = stand.mount('shell.overlay', {});
+  toast.render();
+  let tree = null;
+  for (let i = 0; i < 6; i += 1) { await flush(); if (toast.dirty) tree = toast.render(); }
+
+  const shown = expandComponent(tree);
+  assert.ok(findByClass(shown, 'ors-toast'), 'the escalation must render a toast');
+  assert.equal(tree.props.level, 'warn', `the toast must carry the level it escalated to — got ${tree.props.level}`);
+  assert.equal(tree.props.keyId, 'build-bot', 'and the key it escalated on');
+  const words = textOf(shown).join(' | ');
+  assert.ok(words.includes('build-bot'), `the toast must name the key: ${words}`);
+
+  findByTag(shown, 'button').props.onClick(); // the dismiss button
+  for (let i = 0; i < 6; i += 1) { await flush(); if (toast.dirty) tree = toast.render(); }
+  assert.equal(expandComponent(tree), null, 'the toast must be gone once dismissed');
+  // The seen key is what keeps it gone, and it names the period (M2): a
+  // dismissal today must not silence tomorrow's budget.
+  assert.deepEqual(
+    stand.writes.filter(entry => entry.key === 'ors.seenLimit').map(entry => entry.value),
+    ['build-bot:warn:2026-10-09'],
+    `the dismissal must record the level in its own period — got ${JSON.stringify(stand.writes)}`,
+  );
+});
+
+test('opening the popover from the toast retires it and asks the chip to open', async () => {
+  // The other retirement path. Clicking the message is not a dismissal — it
+  // is "take me there", so it must fire the event the chip listens for AND
+  // put the toast away, or the reader gets a popover and a toast about the
+  // same key at once. Both halves of that are load-bearing.
+  const stand = loadWithFetch(warnPayload(), Date.UTC(2026, 9, 9, 12, 0, 0), {
+    'ors.limitNotice': '1',
+    'ors.keyId': 'build-bot',
+  });
+  const toast = stand.mount('shell.overlay', {});
+  toast.render();
+  let tree = null;
+  for (let i = 0; i < 6; i += 1) { await flush(); if (toast.dirty) tree = toast.render(); }
+  assert.ok(findByClass(expandComponent(tree), 'ors-toast'), 'the escalation must render a toast');
+
+  findByClass(expandComponent(tree), 'ors-toast-content').props.onClick();
+  for (let i = 0; i < 6; i += 1) { await flush(); if (toast.dirty) tree = toast.render(); }
+
+  assert.ok(stand.events.includes('ors:open-popover'),
+    `the click must ask the chip to open its popover — dispatched ${JSON.stringify(stand.events)}`);
+  assert.equal(expandComponent(tree), null, 'the toast must be retired once the popover is asked for');
+  assert.deepEqual(
+    stand.writes.filter(entry => entry.key === 'ors.seenLimit').map(entry => entry.value),
+    ['build-bot:warn:2026-10-09'],
+    'and the level is recorded as seen, exactly as a dismissal does',
+  );
+});
+
+test('warn and critical toast copy differ in every language', () => {
+  // m9: the pairs used to be byte-identical in all three locales, so the
+  // toast — the one limit surface with no room for a marker — carried no
+  // level distinction at all. The placeholders must survive the rewording.
+  const keys = ['limitToastWarn', 'limitToastCritical', 'limitToastWarnNoEstimate', 'limitToastCriticalNoEstimate'];
+  for (const lang of ['en', 'zh', 'ru']) {
+    assert.notEqual(dicts[lang].limitToastWarn, dicts[lang].limitToastCritical, `${lang}: the warn copy must differ from critical`);
+    assert.notEqual(dicts[lang].limitToastWarnNoEstimate, dicts[lang].limitToastCriticalNoEstimate, `${lang}: the no-estimate pair must differ too`);
+    for (const key of keys) {
+      for (const param of ['{name}', '{percent}', '{period}', '{limit}']) {
+        assert.ok(dicts[lang][key].includes(param), `${lang} ${key} must keep ${param}`);
+      }
+    }
+    assert.ok(dicts[lang].limitToastWarn.includes('{estimate}'), `${lang}: the estimate variant keeps its figure`);
+    assert.ok(dicts[lang].limitToastCritical.includes('{estimate}'), `${lang}: the estimate variant keeps its figure`);
+  }
+});
+
+test('the request failure code has a sentence in every language', () => {
+  // m8: both halves classify a 4xx as `request`, but no dictionary had a key
+  // for it, so a classified failure rendered "the reason is unknown" while
+  // the raw detail below told the truth.
+  assert.equal(api.failureLabelKey('request'), 'errorRequest');
+  for (const lang of ['en', 'zh', 'ru']) {
+    assert.ok((dicts[lang].errorRequest ?? '').length > 0, `${lang} must translate errorRequest`);
+  }
+});
+
+test('the limit-notice hint states the default in every language', () => {
+  // N11: en used to omit the default-off statement zh and ru both carry,
+  // under the same key. The three cannot be compared word for word; the
+  // content contract is that each says the feature ships off.
+  const statesDefault = /off by default|默认关闭|По умолчанию выключено/i;
+  for (const lang of ['en', 'zh', 'ru']) {
+    assert.ok(statesDefault.test(dicts[lang].limitNoticeHint), `${lang} must state the default: ${dicts[lang].limitNoticeHint}`);
+  }
+});
+
+test('zone-less burn stamps are read as UTC, and the window and the day totals agree', () => {
+  // m12: `date__hour` arrives with no designator, and a bare `Date.parse`
+  // read it in the reader's zone — on a UTC+3 machine a stamp at the exact
+  // window floor landed three hours below it and was dropped. Both helpers
+  // now read one UTC clock, and numeric stamps count in both, consistently.
+  const nowMs = Date.UTC(2026, 9, 9, 12, 0, 0);
+  const burn = [
+    { ts: '2026-10-09T11:00:00', usd: 1 }, // an hour before now: inside
+    { ts: '2026-10-02T12:00:00', usd: 2 }, // exactly the 7-day floor: inside
+    { ts: '2026-10-02T11:00:00', usd: 4 }, // an hour past the floor: outside
+    { ts: '2026-10-09T13:00:00', usd: 8 }, // the future: outside
+    { ts: Date.UTC(2026, 9, 8, 6), usd: 16 }, // a numeric stamp: counted like a string
+    { ts: 'not a date', usd: 32 }, // unparseable: kept by the window, day-less
+  ];
+  const windowed = windowedBurn(burn, nowMs);
+  assert.ok(windowed.some(bucket => bucket.usd === 1), 'the recent bucket is inside');
+  assert.ok(windowed.some(bucket => bucket.usd === 2), 'the bucket at the floor is inside');
+  assert.ok(!windowed.some(bucket => bucket.usd === 4), 'the bucket past the floor is outside');
+  assert.ok(!windowed.some(bucket => bucket.usd === 8), 'the future is outside');
+  assert.ok(windowed.some(bucket => bucket.usd === 16), 'a numeric stamp is kept');
+  assert.ok(windowed.some(bucket => bucket.usd === 32), 'an unparseable stamp is kept, not silently dropped');
+  // The day totals: today's bucket excluded (still filling), the numeric
+  // stamp placed on its UTC day, and the day-less stamp skipped — it cannot
+  // contribute to a per-day rate.
+  const totals = closedDayTotals(windowed, nowMs);
+  assert.deepEqual([...totals].sort((a, b) => a - b), [2, 16]);
+});
+
+test('a bucket older than the burn window never reaches the day totals or the runway', () => {
+  // m17: widening `LIMIT_BURN_WINDOW_MS` to 30 days survived mutation testing.
+  // The cutoff is what forgets an old burst instead of letting it inflate the
+  // rate for a month. m12 above pins the window's ARITHMETIC (the UTC parse,
+  // the floor, the future); this pins the cutoff's EFFECT on the decision —
+  // that `closedDayTotals` and the runway are drawn from the windowed list and
+  // from nothing older.
+  const nowMs = Date.UTC(2026, 9, 9, 12, 0, 0); // the floor is 2026-10-02T12:00Z
+  const inWindow = [
+    { ts: '2026-10-03T10:00:00', usd: 2 },
+    { ts: '2026-10-04T10:00:00', usd: 2 },
+    { ts: '2026-10-05T10:00:00', usd: 2 },
+    { ts: '2026-10-06T10:00:00', usd: 2 },
+    { ts: '2026-10-07T10:00:00', usd: 2 },
+  ];
+  // Five old days at 250x the current rate: a burst from a fortnight ago.
+  const stale = [
+    { ts: '2026-09-27T10:00:00', usd: 500 },
+    { ts: '2026-09-28T10:00:00', usd: 500 },
+    { ts: '2026-09-29T10:00:00', usd: 500 },
+    { ts: '2026-09-30T10:00:00', usd: 500 },
+    { ts: '2026-10-01T10:00:00', usd: 500 },
+  ];
+  const burn = [...inWindow, ...stale];
+
+  // The cutoff itself: only the five recent buckets survive.
+  const windowed = windowedBurn(burn, nowMs);
+  assert.equal(windowed.length, 5,
+    `the five stale buckets must be dropped — kept ${JSON.stringify(windowed.map(b => b.ts))}`);
+  assert.deepEqual([...windowed].map(bucket => bucket.usd).sort((a, b) => a - b), [2, 2, 2, 2, 2],
+    'what survives is the recent spend alone');
+
+  // And the day totals are drawn from that list, so the old days contribute
+  // nothing — while the in-window days all count (the second half of m17).
+  assert.deepEqual([...closedDayTotals(windowed, nowMs)].sort((a, b) => a - b), [2, 2, 2, 2, 2]);
+
+  // End to end through the real decision, with `limitState` doing its own
+  // filtering from the raw payload shape: 50 of 100 left at $2/day is 25 days
+  // of runway and no alarm. The stale days would read $251/day and 0.2 days,
+  // which is a critical — so a widened window does not merely change a number,
+  // it raises a false alarm.
+  const state = limitState({ limit: 100, limitRemaining: 50, limitReset: null, burn, nowMs });
+  assert.equal(state.level, 'none', `a fortnight-old burst must not flag a healthy key — got ${state.level}`);
+  assert.equal(state.perDayUsd, 2, `the rate must come from the window — got ${state.perDayUsd}`);
+  assert.equal(state.runwayDays, 25, `the runway must come from the window — got ${state.runwayDays}`);
+  // The runway is "how fast can it go", so it follows the heaviest hour INSIDE
+  // the window: $50 at $2/h is 25 h. The stale $500 hour would say 6 min.
+  assert.equal(state.runwayMs, 90_000_000, `the peak must be the in-window peak — got ${state.runwayMs}`);
+
+  // The contrast, for the reader: counted directly the very same stale days
+  // triple the rate. Only the cutoff keeps them out.
+  const unwindowed = closedDayTotals(burn, nowMs);
+  assert.deepEqual([...unwindowed].sort((a, b) => a - b), [2, 2, 2, 2, 2, 500, 500, 500, 500, 500],
+    'closedDayTotals has no cutoff of its own — the window is what forgets');
+  assert.equal(median(unwindowed), 251, 'and that is the false rate a widened window would report');
+});
+
+/**
+ * One dictionary block, found by its `lang: {` line and then brace-matched
+ * from the opening brace.
+ *
+ * Located by pattern rather than by a fixed indentation or a fixed character
+ * window (N13): a reformat of `client.js` must fail loudly, never hand a slice
+ * of the wrong block to the assertions below. The braces INSIDE the strings
+ * balance (`{count}` opens and closes), so plain depth counting ends on the
+ * block's own closing brace.
+ */
+function dictBlock(lang) {
+  const open = source.match(new RegExp(`^\\s*${lang}: \\{`, 'm'));
+  assert.ok(open, `client.js must keep a ${lang} dictionary block`);
+  const start = source.indexOf('{', open.index);
+  let depth = 0;
+  for (let i = start; i < source.length; i += 1) {
+    if (source[i] === '{') depth += 1;
+    else if (source[i] === '}') {
+      depth -= 1;
+      if (depth === 0) return source.slice(start, i + 1);
+    }
+  }
+  throw new Error(`unbalanced braces in the ${lang} dictionary block`);
 }
 
 const unescapeUnicode = value => value.replace(/\\u([0-9a-fA-F]{4})/g, (m, hex) => String.fromCharCode(parseInt(hex, 16)));
@@ -932,9 +1392,9 @@ function parseDict(block) {
 }
 
 const dicts = {
-  en: parseDict(dictBlock(source.indexOf('\n          en: {') + 1)),
-  zh: parseDict(dictBlock(source.indexOf('\n          zh: {') + 1)),
-  ru: parseDict(dictBlock(source.indexOf('\n          ru: {') + 1)),
+  en: parseDict(dictBlock('en')),
+  zh: parseDict(dictBlock('zh')),
+  ru: parseDict(dictBlock('ru')),
 };
 
 const designDoc = readFileSync(join(here, '..', 'docs', 'design', 'limit-notice.md'), 'utf8');

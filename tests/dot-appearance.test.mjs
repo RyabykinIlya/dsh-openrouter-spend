@@ -10,9 +10,13 @@
  * compute.
  *
  * The token values are fixtures read out of the running DSH GUI on 2026-10-09,
- * so the colours are the real ones. A real browser was used to confirm them:
- * docs/mockups/dot-states-browser-check.png is that render, and it agrees with
- * every assertion below.
+ * so the colours are the real ones. The cascade itself is a STATIC ANALYSIS:
+ * this file re-implements specificity and document order rather than driving a
+ * browser engine (N14), so it verifies what a browser WOULD compute, not what
+ * one rendered — no screenshot is offered as evidence, because none was
+ * produced. The mockup that does exist, docs/mockups/limit-notice.html, shows
+ * the same dot states side by side; it illustrates the intended look and is
+ * not a verification of the assertions below.
  */
 
 import test from 'node:test';

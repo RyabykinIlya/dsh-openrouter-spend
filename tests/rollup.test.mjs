@@ -103,9 +103,10 @@ test('rollupSessions: a session with descendants but no row of its own carries t
   ])
 })
 
-test('rollupSessions: a cycle in childrenByParent terminates without double-counting', {
-  timeout: 2000,
-}, () => {
+// No `timeout` option on the cycle tests: `rollupSessions` keeps a seen-set,
+// so a walk terminates on its own and a wall-clock guard would only ever hide
+// a hang as a generic failure (N15).
+test('rollupSessions: a cycle in childrenByParent terminates without double-counting', () => {
   // a corrupt header pair: neither is an ancestor, each names the other
   const rolled = rollupSessions(
     [row('a', 1, 10, 0, 0), row('b', 3, 30, 0, 0)],
@@ -119,7 +120,7 @@ test('rollupSessions: a cycle in childrenByParent terminates without double-coun
   ])
 })
 
-test('rollupSessions: a session listed as its own parent terminates', { timeout: 2000 }, () => {
+test('rollupSessions: a session listed as its own parent terminates', () => {
   const rolled = rollupSessions([row('self', 2, 20, 0.2, 2)], lineage([['self', ['self']]]))
 
   assert.deepEqual(money(rolled), [row('self', 2, 20, 0.2, 2)])
