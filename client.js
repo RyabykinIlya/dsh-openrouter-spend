@@ -18,6 +18,14 @@ window.__ModuleLoader__.load({
     const PREFS_CHANGED = 'ors:prefs';
     const EVENT_OPEN_POPOVER = 'ors:open-popover';
 
+    /**
+     * The locale `apply` last saw. Factory scope, not component state: a plural
+     * form is chosen while building a string, and the components read the active
+     * locale only to pick one. English until `apply` hears otherwise, so a host
+     * with no locale plugin still renders a sentence.
+     */
+    let activeLocaleId = 'en';
+
     const CSS = `
 .ors-root { position: relative; display: inline-flex; }
 .ors-chip {
@@ -507,14 +515,56 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * The CLDR plural category for `count` in `localeId`.
+     *
+     * The dictionary layer is a flat map with `{name}` substitution and no plural
+     * support at all, so the form a language needs cannot live in the string: it
+     * has to be chosen here, in code. `Intl.PluralRules` is the correct source for
+     * that choice — Russian alone has one/few/many, and which one a numeral takes
+     * is a rule about its last digits (21 takes the one form), not something a
+     * sentence can read off the number. An unsupported locale id, or a runtime
+     * without `Intl`, falls back to `other`, the category every language has.
+     */
+    function pluralCategory(count, localeId) {
+      try {
+        return new Intl.PluralRules(localeId || 'en').select(count);
+      } catch {
+        return 'other';
+      }
+    }
+
+    /**
+     * Resolve a pluralised dictionary key through a flat `t`.
+     *
+     * The category-specific key is probed first (`limitApproxRequests_few`) and
+     * the base key is the fallback, so a language that adds no variants — Chinese
+     * has only the `other` category — keeps working with the base string alone.
+     *
+     * The locale plugin's `t` returns the KEY ITSELF when a lookup misses and
+     * exposes no `has()`, so comparing the result against the suffixed name is
+     * the only way to test key presence through a flat `t`.
+     */
+    function tPlural(t, key, count, localeId, params) {
+      const suffixed = `${key}_${pluralCategory(count, localeId)}`;
+      const resolved = t(suffixed, params);
+      return resolved === suffixed ? t(key, params) : resolved;
+    }
+
+    /**
      * The line under the meter. The remaining money always leads: it is the figure
      * the reader asked for, and the consumed share alone never says how much is
      * left. Past a threshold the estimate of time takes over from a count of
      * requests, because that is what a decision turns on. At `critical` the refill
      * moment is dropped too — the runway is the only number that changes what the
      * reader does next.
+     *
+     * `localeId` selects the plural form for the two numerals in the sentence; it
+     * is optional so the three-argument call still works, and defaults to English.
      */
-    function limitSentence(state, money, t) {
+    function limitSentence(state, money, t, localeId) {
+      // The active locale decides the plural form. Absent means English, so the
+      // three-argument call the older tests use still renders a sentence.
+      const locale = localeId || 'en';
       if (state === undefined) return undefined;
       const flagged = state.level !== 'none';
       const parts = [t('limitLeft', {
@@ -531,17 +581,23 @@ window.__ModuleLoader__.load({
         // At rest the count of requests is the useful extra; past a threshold the
         // time estimate replaces it, because that is what a decision turns on.
         if (!flagged && state.requests !== undefined) {
-          parts.push(t('limitApproxRequests', { count: state.requests }));
+          parts.push(tPlural(t, 'limitApproxRequests', state.requests, locale, { count: state.requests }));
         }
         if (days !== undefined && days <= 1) parts.push(t('limitUnderADay'));
         else if (days !== undefined) {
           // A span past a year renders as nothing, and the fragment has to go
           // with it: "~undefined at this rate" is worse than no estimate at all.
           const span = fmtDuration(days * MS_PER_DAY);
-          if (span !== undefined) parts.push(t('limitDaysAtRate', { days: Math.round(days) }));
+          if (span !== undefined) {
+            // The ROUNDED day count is the one on screen, so it is the one the
+            // plural rule has to see: `select(2.9)` is `other` in Russian, which
+            // would print "~3 дней" for a numeral that reads "3 дня".
+            const rounded = Math.round(days);
+            parts.push(tPlural(t, 'limitDaysAtRate', rounded, locale, { days: rounded }));
+          }
         }
         else if (flagged && state.requests !== undefined) {
-          parts.push(t('limitApproxRequests', { count: state.requests }));
+          parts.push(tPlural(t, 'limitApproxRequests', state.requests, locale, { count: state.requests }));
         }
       } else if (state.imminent) {
         // Minutes to the refill, which is sooner than any runway: the refill is
@@ -882,14 +938,14 @@ window.__ModuleLoader__.load({
             level: noticeState?.level ?? 'none',
             key: [`${t('limitKey')} · `, h('span', { key: 'k', style: { color: keyTint(keyId) } }, keyId)],
             pct: noticeState?.percent,
-            note: withBurnNote(limitSentence(noticeState, money, t), burnNote),
+            note: withBurnNote(limitSentence(noticeState, money, t, activeLocaleId), burnNote),
           };
         } else if (tightest !== undefined && !balanceBinds) {
           quota = {
             level: tightest.state.level,
             key: [`${t('limitTightest')} · `, h('span', { key: 'k', style: { color: keyTint(tightest.id) } }, tightest.id)],
             pct: tightest.state.percent,
-            note: withBurnNote(limitSentence(tightest.state, money, t), burnNote),
+            note: withBurnNote(limitSentence(tightest.state, money, t, activeLocaleId), burnNote),
           };
         } else if (balanceBinds || (keyId === '' && balance !== undefined)) {
           const total = data.credits?.totalCredits;
@@ -1253,6 +1309,8 @@ window.__ModuleLoader__.load({
       // the same way; `client.js` cannot be an ES module, so this is the seam.
       limitState,
       limitSentence,
+      pluralCategory,
+      tPlural,
       withBurnNote,
       dotState,
       escalates,
@@ -1263,6 +1321,16 @@ window.__ModuleLoader__.load({
       peakHourlyBurn,
       closedDayTotals,
       apply(ctx) {
+        // The active locale drives the plural form, so it is tracked here rather
+        // than read per render. Both reads are feature-detected: a host (or a
+        // test) may expose a `locale` with only register/bind and no event bus,
+        // and the sentence must still render.
+        if (typeof ctx.locale?.getSnapshot === 'function') {
+          activeLocaleId = ctx.locale.getSnapshot().active;
+        }
+        if (typeof ctx.on === 'function') {
+          ctx.on('locale/change', snapshot => { activeLocaleId = snapshot.active; });
+        }
         // The nav label is read through a thunk so it follows the active locale.
         let tr = key => key;
         ctx.effect(() => {
@@ -1309,8 +1377,10 @@ window.__ModuleLoader__.load({
             limitResetsIn: 'resets in {minutes} min',
             limitLeftAtRate: '~{duration} at this rate',
             limitDaysAtRate: '~{days} days at this rate',
+            limitDaysAtRate_one: '~{days} day at this rate',
             limitUnderADay: 'under a day at this rate',
             limitApproxRequests: '\u2248 {count} requests',
+            limitApproxRequests_one: '\u2248 {count} request',
             limitShared: 'shared by all keys',
             limitTightest: 'Tightest limit',
             limitUnavailable: 'Key limits unavailable: {reason}',
@@ -1432,12 +1502,16 @@ window.__ModuleLoader__.load({
             limitResets: 'сброс {when}',
             limitResetsIn: 'сброс через {minutes} мин',
             limitLeftAtRate: '~{duration} при таком темпе',
-            // No plural helper reaches the dictionary, and "1 дней at this rate"
-            // is worse than no count: the sentence keeps the estimate and drops
-            // the numeral (genitive plurals live in the host's own wording).
-            limitDaysAtRate: 'при таком темпе запас скоро кончится',
+            // The base key is the `other`/`many` form; the suffix keys carry the
+            // one and few forms `tPlural` selects. Russian needs all three, which
+            // is why the numeral cannot be hardcoded in a single string.
+            limitDaysAtRate: '~{days} дней при таком темпе',
+            limitDaysAtRate_one: '~{days} день при таком темпе',
+            limitDaysAtRate_few: '~{days} дня при таком темпе',
             limitUnderADay: 'меньше суток при таком темпе',
-            limitApproxRequests: 'запас запросов ещё есть',
+            limitApproxRequests: '\u2248 {count} запросов',
+            limitApproxRequests_one: '\u2248 {count} запрос',
+            limitApproxRequests_few: '\u2248 {count} запроса',
             limitShared: 'общий для всех ключей',
             limitTightest: 'Самый жёсткий лимит',
             limitUnavailable: 'Лимиты ключей недоступны: {reason}',

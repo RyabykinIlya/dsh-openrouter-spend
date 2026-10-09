@@ -42,7 +42,7 @@ function load() {
 }
 
 const api = load();
-const { limitState, limitSentence, withBurnNote, dotState, escalates, fmtDuration, nextResetMs, resetTextFor, median, peakHourlyBurn, closedDayTotals } = api;
+const { limitState, limitSentence, pluralCategory, tPlural, withBurnNote, dotState, escalates, fmtDuration, nextResetMs, resetTextFor, median, peakHourlyBurn, closedDayTotals } = api;
 
 /** Burn buckets for `closedDayTotals`: `days` full UTC days ending before `nowMs`. */
 function burnFor(nowMs, perDay, days) {
@@ -477,4 +477,150 @@ test('every registered component renders without throwing', () => {
       `${name} must render`,
     );
   }
+});
+
+test('pluralCategory reads the CLDR category, and refuses to guess', () => {
+  // Russian is the reason the helper exists: one/few/many are three distinct
+  // forms of the same noun, and which one a numeral takes is a rule about its
+  // last digits, not a comparison against 1.
+  assert.equal(pluralCategory(1, 'ru'), 'one');
+  assert.equal(pluralCategory(2, 'ru'), 'few');
+  assert.equal(pluralCategory(5, 'ru'), 'many');
+  // 21 and 22 are the cases a hand-rolled `count === 1` gets wrong.
+  assert.equal(pluralCategory(21, 'ru'), 'one');
+  assert.equal(pluralCategory(22, 'ru'), 'few');
+  assert.equal(pluralCategory(25, 'ru'), 'many');
+  // English has two, and Chinese only `other`.
+  assert.equal(pluralCategory(1, 'en'), 'one');
+  assert.equal(pluralCategory(2, 'en'), 'other');
+  assert.equal(pluralCategory(1, 'zh'), 'other');
+  // An unusable locale id must not throw into a render: `other` is the category
+  // every language has, so the base string is what comes out.
+  const bogus = 'not a locale!';
+  assert.throws(() => new Intl.PluralRules(bogus), 'the fixture must really be invalid');
+  assert.equal(pluralCategory(1, bogus), 'other');
+  // A missing locale id behaves as English.
+  assert.equal(pluralCategory(1, undefined), 'one');
+});
+
+test('tPlural picks the suffixed key, and falls back to the base one', () => {
+  // A flat `t` with no `has()`: a miss returns the key itself, which is the only
+  // signal a probe can read.
+  const dict = {
+    limitApproxRequests: '≈ {count} requests',
+    limitApproxRequests_one: '≈ {count} request',
+  };
+  const t = (key, params) => {
+    const template = dict[key] ?? key;
+    return params ? template.replace(/\{(\w+)\}/g, (m, n) => (n in params ? String(params[n]) : m)) : template;
+  };
+
+  // Present: the category-specific form wins.
+  assert.equal(tPlural(t, 'limitApproxRequests', 1, 'en', { count: 1 }), '≈ 1 request');
+  // Absent (`limitApproxRequests_other` is not in the dictionary): the base form.
+  assert.equal(tPlural(t, 'limitApproxRequests', 5, 'en', { count: 5 }), '≈ 5 requests');
+  // A language with no variants at all still resolves through the base key.
+  assert.equal(tPlural(t, 'limitApproxRequests', 2, 'zh', { count: 2 }), '≈ 2 requests');
+  // A key with no base variant either comes back as the key itself, untouched —
+  // the same thing a flat `t` does everywhere else, so nothing new breaks.
+  assert.equal(tPlural(t, 'noSuchKey', 1, 'en'), 'noSuchKey');
+  // An unsupported locale id falls back to the base form rather than throwing.
+  assert.equal(tPlural(t, 'limitApproxRequests', 1, 'not a locale!', { count: 1 }), '≈ 1 requests');
+});
+
+test('the Russian sentence counts requests in the right form for 1, 2 and 5', () => {
+  const money = { fmt: v => `$${v.toFixed(2)}` };
+  // The dictionary the ru block ships, with only the keys the sentence reaches.
+  const dict = {
+    limitLeft: 'Осталось {left} из {limit}',
+    limitConsumed: 'израсходовано {percent}%',
+    limitResets: 'сброс {when}',
+    limitResetsIn: 'сброс через {minutes} мин',
+    limitLeftAtRate: '~{duration} при таком темпе',
+    limitDaysAtRate: '~{days} дней при таком темпе',
+    limitDaysAtRate_one: '~{days} день при таком темпе',
+    limitDaysAtRate_few: '~{days} дня при таком темпе',
+    limitUnderADay: 'меньше суток при таком темпе',
+    limitApproxRequests: '≈ {count} запросов',
+    limitApproxRequests_one: '≈ {count} запрос',
+    limitApproxRequests_few: '≈ {count} запроса',
+  };
+  const t = (key, params) => {
+    const template = dict[key] ?? key;
+    return params ? template.replace(/\{(\w+)\}/g, (m, n) => (n in params ? String(params[n]) : m)) : template;
+  };
+
+  // A remainder worth exactly `wanted` requests: $0.02 each, and a burn of
+  // $0.002/day over five closed days, which leaves the cap unflagged so the
+  // count is the extra the sentence carries.
+  const atRest = wanted => limitState({
+    limit: 25, limitRemaining: wanted * 0.02, limitReset: null,
+    burn: burnFor(NOW, 0.002, 5), nowMs: NOW, avgRequestUsd: 0.02,
+  });
+
+  const one = atRest(1);
+  assert.equal(one.level, 'none');
+  assert.equal(one.requests, 1);
+  const oneLine = limitSentence(one, money, t, 'ru');
+  assert.ok(oneLine.includes('≈ 1 запрос'), oneLine);
+  // The whole bug: the many form next to a numeral that takes the one form.
+  assert.ok(!oneLine.includes('запросов'), `no many form for 1: ${oneLine}`);
+
+  const two = atRest(2);
+  assert.equal(two.requests, 2);
+  const twoLine = limitSentence(two, money, t, 'ru');
+  assert.ok(twoLine.includes('≈ 2 запроса'), twoLine);
+  assert.ok(!twoLine.includes('запросов'), `no many form for 2: ${twoLine}`);
+
+  const five = atRest(5);
+  assert.equal(five.requests, 5);
+  const fiveLine = limitSentence(five, money, t, 'ru');
+  assert.ok(fiveLine.includes('≈ 5 запросов'), fiveLine);
+
+  // The day count has the same problem, and the form must follow the ROUNDED
+  // figure that is actually on screen: 1.4 days prints "1", so it reads "1 день".
+  const days = limitState({
+    limit: 25, limitRemaining: 0.0028, limitReset: null,
+    burn: burnFor(NOW, 0.002, 5), nowMs: NOW,
+  });
+  assert.equal(Math.round(days.runwayDays), 1);
+  const daysLine = limitSentence(days, money, t, 'ru');
+  assert.ok(daysLine.includes('~1 день при таком темпе'), daysLine);
+  assert.ok(!daysLine.includes('дней при таком темпе'), `no many form for 1 day: ${daysLine}`);
+
+  // Three arguments still renders: an absent locale id means English, and the
+  // other tests in this file call it that way. The dictionary here is Russian,
+  // so only the CATEGORY is English — the wording comes from `t`.
+  const threeArg = limitSentence(one, money, t);
+  assert.equal(threeArg, limitSentence(one, money, t, 'en'));
+  assert.ok(threeArg.startsWith('Осталось $0.02 из $25.00'), threeArg);
+  assert.ok(threeArg.includes('≈ 1 запрос'), threeArg);
+});
+
+test('apply reads the active locale, and survives a host that offers neither', () => {
+  // The positive path: a real locale plugin, with a snapshot and an event bus.
+  // This is the branch the components read, and unlike the negative path below
+  // it was uncovered — an unguarded call would have thrown here.
+  const handlers = {};
+  const slots = {};
+  assert.doesNotThrow(() => api.apply({
+    effect: fn => { fn(); return () => {}; },
+    on: (event, handler) => { handlers[event] = handler; },
+    locale: {
+      getSnapshot: () => ({ active: 'ru' }),
+      register: () => () => {},
+      bind: () => key => key,
+    },
+    slots: {
+      inject: (name, thunk) => { thunk(); },
+      register: (definition, Component) => { slots[definition.name] = Component; return () => {}; },
+    },
+  }), 'apply must accept a locale plugin that has a snapshot');
+  assert.equal(typeof handlers['locale/change'], 'function', 'the locale change must be subscribed');
+  // The handler is what keeps the plural form current, so it must be callable
+  // and must not throw on the snapshot shape the plugin documents.
+  assert.doesNotThrow(() => handlers['locale/change']({ active: 'en' }));
+  assert.doesNotThrow(() => Object.values(slots).forEach(
+    Component => Component({ t: key => key, sessionId: 'session' }),
+  ), 'the components must render after a locale change');
 });
