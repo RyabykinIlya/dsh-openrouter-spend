@@ -298,26 +298,26 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * The buckets a rate may be drawn from: the trailing window, never the
-     * future, and never before the cap was last set. A stamp that will not parse
-     * is kept rather than dropped: it carries a figure someone measured, and
-     * dropping it on a parse failure would silently understate the burn.
+     * The buckets a rate may be drawn from: the trailing window, and never the
+     * future. A stamp that will not parse is kept rather than dropped: it carries
+     * a figure someone measured, and dropping it on a parse failure would
+     * silently understate the burn.
      *
-     * `updatedAtMs` guards against spend that predates the current cap: under no
-     * cap, that spend is no evidence of the pace this cap will be consumed at.
-     * The host does not ship the field yet — the payload carries the four limit
-     * fields, and `updated_at` is null for most keys anyway — so this filter is
-     * inert today. It is written to close the moment the field arrives rather
-     * than to pretend it is already closed.
+     * There is deliberately no pre-cap floor here. The management `/keys`
+     * payload carries no trustworthy "this limit was set at" timestamp: the
+     * record's own last-modified field was null for 7 of the 9 limited keys on
+     * the measured account, and where it is present it reads as a
+     * record-mutation time rather than the moment a cap was set. A floor built
+     * on it would drop real spend on the strength of a field whose meaning is
+     * unverified on the live API, so no floor is applied.
      */
-    function windowedBurn(burn, nowMs, updatedAtMs) {
+    function windowedBurn(burn, nowMs) {
       const list = Array.isArray(burn) ? burn : [];
       const floor = nowMs - LIMIT_BURN_WINDOW_MS;
       return list.filter(bucket => {
         const at = parseInstant(bucket?.ts);
         if (at === undefined) return true;
         if (at > nowMs) return false;
-        if (updatedAtMs !== undefined && at < updatedAtMs) return false;
         return at >= floor;
       });
     }
@@ -443,10 +443,7 @@ window.__ModuleLoader__.load({
       const remainingUsd = Math.max(0, remainingRaw);
       const percent = Math.min(100, Math.max(0, ((cap - remainingUsd) / cap) * 100));
       const resetAtMs = nextResetMs(limitReset, nowMs);
-      // Spend booked before the cap was last changed describes a different cap:
-      // if every bucket predates it, no rate is attributable to this one.
-      const updatedAtMs = parseInstant(input?.updatedAt ?? input?.updated_at);
-      const burnWindow = windowedBurn(burn, nowMs, updatedAtMs);
+      const burnWindow = windowedBurn(burn, nowMs);
       const peak = peakHourlyBurn(burnWindow);
       const runwayMs = peak > 0 ? (remainingUsd / peak) * MS_PER_HOUR : undefined;
       const avgRequestUsd = Number(input?.avgRequestUsd);
@@ -806,7 +803,6 @@ window.__ModuleLoader__.load({
           limit: keyLimit?.limit,
           limitRemaining: keyLimit?.limitRemaining,
           limitReset: keyLimit?.limitReset,
-          updatedAt: keyLimit?.updatedAt ?? keyLimit?.updated_at,
           burn: keyBurn,
           avgRequestUsd,
           previous: levelRef.current,
@@ -847,7 +843,6 @@ window.__ModuleLoader__.load({
               limit: entry?.limit,
               limitRemaining: entry?.limitRemaining,
               limitReset: entry?.limitReset,
-              updatedAt: entry?.updatedAt ?? entry?.updated_at,
               burn: data?.burnHourly?.[id],
               previous: 'none',
               thresholds: data?.limitThresholds,
@@ -1052,7 +1047,6 @@ window.__ModuleLoader__.load({
           limit: keyLimit?.limit,
           limitRemaining: keyLimit?.limitRemaining,
           limitReset: keyLimit?.limitReset,
-          updatedAt: keyLimit?.updatedAt ?? keyLimit?.updated_at,
           burn: keyBurn,
           avgRequestUsd,
           previous: levelRef.current,
