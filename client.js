@@ -561,6 +561,20 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * Append the reason the runway estimate is missing, when the hourly read
+     * failed. Without this a failed read and a key that simply has no burn to
+     * report look identical — both render a sentence with no estimate — and the
+     * panel stays silent about a figure the reader is expecting. The reason is
+     * appended rather than substituted: what is left of the limit is still known
+     * and is the figure the reader came for.
+     */
+    function withBurnNote(sentence, burnNote) {
+      if (burnNote === undefined) return sentence;
+      if (sentence === undefined) return burnNote;
+      return `${sentence} \u00b7 ${burnNote}`;
+    }
+
+    /**
      * Whether a level change is an escalation worth interrupting for. Pure, so
      * the rule is testable and cannot drift between the two components that use
      * it. De-escalation and an unchanged level are both silent.
@@ -592,12 +606,35 @@ window.__ModuleLoader__.load({
       window.dispatchEvent(new CustomEvent(PREFS_CHANGED));
     }
 
-    /** One shared fetch of the host summary. */
-    function fetchSummary() {
-      return fetch('/openrouter-spend/summary', {
+    /**
+     * How long one summary reply stands in for another. `Pill` and `ToastOverlay`
+     * each poll on their own interval, so two components would otherwise mean two
+     * HTTP requests per tick for one answer. The host already coalesces upstream,
+     * so this only removes the duplicate request; it never changes what is asked.
+     */
+    const SUMMARY_COALESCE_MS = 1000;
+    let summaryInflight;
+    let summaryInflightAt = 0;
+
+    /**
+     * One shared fetch of the host summary. Callers arriving within
+     * `SUMMARY_COALESCE_MS` of each other share the one request.
+     *
+     * `force` is for a caller the window must not answer: the Settings Reload
+     * button is an explicit request for the current figures, so it must not be
+     * handed a reply that was already in flight.
+     */
+    function fetchSummary(force) {
+      const at = Date.now();
+      if (!force && summaryInflight !== undefined && at - summaryInflightAt < SUMMARY_COALESCE_MS) {
+        return summaryInflight;
+      }
+      summaryInflightAt = at;
+      summaryInflight = fetch('/openrouter-spend/summary', {
         credentials: 'same-origin',
         headers: { accept: 'application/json' },
       }).then(response => (response.ok ? response.json() : undefined)).catch(() => undefined);
+      return summaryInflight;
     }
 
     /**
@@ -697,13 +734,6 @@ window.__ModuleLoader__.load({
         return () => window.removeEventListener(EVENT_OPEN_POPOVER, handler);
       }, []);
 
-      // When the popover opens, mark the current level as seen.
-      useEffect(() => {
-        if (open && noticeOn && keyId !== '' && noticeState?.level && noticeState.level !== 'none') {
-          writeSeenLimit(keyId, noticeState.level);
-        }
-      }, [open, noticeOn, keyId, noticeState?.level]);
-
       useEffect(() => {
         if (!open) return undefined;
         const onPointerDown = event => {
@@ -765,6 +795,12 @@ window.__ModuleLoader__.load({
       const avgRequestUsd = selected !== undefined && selected.requests > 0
         ? selected.usd / selected.requests
         : undefined;
+      // The host writes `burnError` when the hourly window could not be read, and
+      // every runway estimate rides on that window. Said out loud, because the
+      // alternative is a sentence that quietly drops the estimate.
+      const burnNote = noticeOn && data !== null && data?.burnError !== undefined
+        ? t('limitBurnUnavailable', { reason: data.burnError })
+        : undefined;
       const noticeState = noticeOn && data !== null
         ? limitState({
           limit: keyLimit?.limit,
@@ -786,6 +822,15 @@ window.__ModuleLoader__.load({
         if (noticeState === undefined) return;
         levelRef.current = noticeState.level;
       });
+      // When the popover opens, mark the current level as seen. This effect must
+      // stay *below* the `noticeState` declaration: its dependency array is read
+      // during render, and reading a `const` above its own declaration is a
+      // temporal dead zone reference that throws on every render.
+      useEffect(() => {
+        if (open && noticeOn && keyId !== '' && noticeState?.level && noticeState.level !== 'none') {
+          writeSeenLimit(keyId, noticeState.level);
+        }
+      }, [open, noticeOn, keyId, noticeState?.level]);
       // A key with spend but no readable limit must say so. Silence reads as
       // health, which is the one thing this block must never lie about.
       const limitUnknown = noticeOn && data !== null && (data.limitsError !== undefined
@@ -837,14 +882,14 @@ window.__ModuleLoader__.load({
             level: noticeState?.level ?? 'none',
             key: [`${t('limitKey')} · `, h('span', { key: 'k', style: { color: keyTint(keyId) } }, keyId)],
             pct: noticeState?.percent,
-            note: limitSentence(noticeState, money, t),
+            note: withBurnNote(limitSentence(noticeState, money, t), burnNote),
           };
         } else if (tightest !== undefined && !balanceBinds) {
           quota = {
             level: tightest.state.level,
             key: [`${t('limitTightest')} · `, h('span', { key: 'k', style: { color: keyTint(tightest.id) } }, tightest.id)],
             pct: tightest.state.percent,
-            note: limitSentence(tightest.state, money, t),
+            note: withBurnNote(limitSentence(tightest.state, money, t), burnNote),
           };
         } else if (balanceBinds || (keyId === '' && balance !== undefined)) {
           const total = data.credits?.totalCredits;
@@ -1070,8 +1115,8 @@ window.__ModuleLoader__.load({
       const [draft, setDraft] = useState('');
       const [notice, setNotice] = useState(null);
 
-      const reload = useCallback(async () => {
-        const reply = await fetchSummary();
+      const reload = useCallback(async (force) => {
+        const reply = await fetchSummary(force);
         if (reply !== undefined) setData(reply);
       }, []);
 
@@ -1194,7 +1239,7 @@ window.__ModuleLoader__.load({
               type: 'button',
               onClick: () => { void submit({ clear: true }); },
             }, t('clear')),
-            h('button', { type: 'button', onClick: () => { void reload(); } }, t('reload'))),
+            h('button', { type: 'button', onClick: () => { void reload(true); } }, t('reload'))),
           credential?.writable === false
             ? h('div', { className: 'ors-note' }, t('keyReadOnly'))
             : null,
@@ -1208,6 +1253,7 @@ window.__ModuleLoader__.load({
       // the same way; `client.js` cannot be an ES module, so this is the seam.
       limitState,
       limitSentence,
+      withBurnNote,
       dotState,
       escalates,
       fmtDuration,
@@ -1268,6 +1314,7 @@ window.__ModuleLoader__.load({
             limitShared: 'shared by all keys',
             limitTightest: 'Tightest limit',
             limitUnavailable: 'Key limits unavailable: {reason}',
+            limitBurnUnavailable: 'the pace of spend is unknown: {reason}',
             limitUnknownMatch: 'Limit unknown: this key\u2019s name did not match the account\u2019s key list.',
             limitLevelWarn: 'Limit is running low',
             limitLevelCritical: 'Limit is nearly exhausted',
@@ -1329,6 +1376,7 @@ window.__ModuleLoader__.load({
             limitShared: '所有密钥共用',
             limitTightest: '最紧张的限额',
             limitUnavailable: '无法获取密钥限额：{reason}',
+            limitBurnUnavailable: '无法确定消耗速度：{reason}',
             limitUnknownMatch: '限额未知：该密钥名称未匹配到账户密钥列表。',
             limitLevelWarn: '限额偏低',
             limitLevelCritical: '限额即将耗尽',
@@ -1393,6 +1441,7 @@ window.__ModuleLoader__.load({
             limitShared: 'общий для всех ключей',
             limitTightest: 'Самый жёсткий лимит',
             limitUnavailable: 'Лимиты ключей недоступны: {reason}',
+            limitBurnUnavailable: 'темп расхода неизвестен: {reason}',
             limitUnknownMatch: 'Лимит неизвестен: имя ключа не совпало со списком ключей аккаунта.',
             limitLevelWarn: 'Лимит подходит к концу',
             limitLevelCritical: 'Лимит почти исчерпан',

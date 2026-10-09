@@ -42,7 +42,7 @@ function load() {
 }
 
 const api = load();
-const { limitState, limitSentence, dotState, escalates, fmtDuration, nextResetMs, resetTextFor, median, peakHourlyBurn, closedDayTotals } = api;
+const { limitState, limitSentence, withBurnNote, dotState, escalates, fmtDuration, nextResetMs, resetTextFor, median, peakHourlyBurn, closedDayTotals } = api;
 
 /** Burn buckets for `closedDayTotals`: `days` full UTC days ending before `nowMs`. */
 function burnFor(nowMs, perDay, days) {
@@ -407,7 +407,7 @@ test('the dictionary carries every limit key in all three languages', () => {
     'periodToday', 'periodWeek', 'periodMonth',
     'limitResets', 'limitResetsIn', 'limitLeftAtRate', 'limitApproxRequests',
     'limitDaysAtRate', 'limitUnderADay', 'limitShared', 'limitTightest',
-    'limitUnavailable', 'limitUnknownMatch',
+    'limitUnavailable', 'limitUnknownMatch', 'limitBurnUnavailable',
   ];
   for (const key of required) {
     const count = source.split(`\n`).filter(line => line.trim().startsWith(`${key}:`)).length;
@@ -416,4 +416,65 @@ test('the dictionary carries every limit key in all three languages', () => {
   // The names the spec fixed, and the ones it replaced must be gone.
   assert.ok(!source.includes('limitAtRate:'), 'the split replaced limitAtRate');
   assert.ok(!source.includes('limitToastPeriodToday'), 'periodToday is the shared key');
+});
+
+test('withBurnNote: a failed hourly read is named, not silently dropped', () => {
+  const sentence = '$4.80 of $12.00 left \u00b7 resets 03:00';
+  const note = 'the pace of spend is unknown: hourly analytics answered 500';
+  // The reason is appended, never substituted: what is left of the limit is
+  // still known and is the figure the reader opened the panel for.
+  assert.equal(withBurnNote(sentence, note), `${sentence} \u00b7 ${note}`);
+  assert.ok(withBurnNote(sentence, note).includes(sentence), 'the limit sentence survives');
+});
+
+test('withBurnNote: no burn error leaves the sentence exactly as it was', () => {
+  const sentence = '$4.80 of $12.00 left \u00b7 ~3 days at this rate';
+  assert.equal(withBurnNote(sentence, undefined), sentence);
+  // The toast path assembles its message without a note; undefined must be a
+  // pass-through rather than the string "undefined".
+  assert.ok(!String(withBurnNote(sentence, undefined)).includes('undefined'));
+});
+
+test('withBurnNote: an absent sentence becomes the note alone', () => {
+  // No limit to sentence but a failed hourly read: the note is the whole panel
+  // text, and it must not render as "undefined · reason".
+  const note = 'the pace of spend is unknown: offline';
+  assert.equal(withBurnNote(undefined, note), note);
+  assert.ok(!String(withBurnNote(undefined, note)).includes('undefined'));
+});
+
+test('withBurnNote: both absent renders nothing at all', () => {
+  assert.equal(withBurnNote(undefined, undefined), undefined);
+});
+
+test('every registered component renders without throwing', () => {
+  // This is the regression for a temporal dead zone bug that shipped: `Pill`
+  // listed `noticeState?.level` in an effect's dependency array *above* the
+  // `const noticeState` declaration. A dependency array is evaluated during
+  // render, so reading the binding early threw on every render — the chip never
+  // appeared. No test caught it, because every other test here drives the pure
+  // functions and nothing ever rendered a component. The stub's `useEffect` is a
+  // no-op, which is enough: the throw happened while evaluating its arguments,
+  // before the callback was reached.
+  const slots = {};
+  api.apply({
+    effect: fn => { fn(); return () => {}; },
+    locale: { register: () => () => {}, bind: () => key => key },
+    slots: {
+      inject: (name, thunk) => { thunk(); },
+      register: (definition, Component) => { slots[definition.name] = Component; return () => {}; },
+    },
+  });
+  const names = Object.keys(slots);
+  assert.deepEqual(
+    names.sort(),
+    ['conversation.composer.dock', 'settings.section', 'shell.overlay'],
+    'the three registrations must all be reachable',
+  );
+  for (const name of names) {
+    assert.doesNotThrow(
+      () => slots[name]({ t: key => key, sessionId: 'session' }),
+      `${name} must render`,
+    );
+  }
 });
