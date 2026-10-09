@@ -433,6 +433,14 @@ test('the shipped Russian forms all carry the numeral, and select correctly', ()
   for (const key of ['limitDaysAtRate_one', 'limitDaysAtRate_few']) {
     assert.ok(grab(ru, key).includes('{days}'), `${key} must show the day count`);
   }
+  // The tightest-key label counts how many limited keys the pick came from, and
+  // the design doc's key table promises that `{count}`. A mutation check showed
+  // nothing else pins it: stripping the numeral from all three languages left
+  // every test green, because the only other mention is a presence check.
+  assert.ok(grab(ru, 'limitTightest').includes('{count}'), 'ru must name how many limits were compared');
+  assert.ok(grab(ru, 'limitTightest_one').includes('{count}'), 'ru must take the genitive singular for one');
+  assert.ok(grab(en, 'limitTightest').includes('{count}'), 'en must name how many limits were compared');
+  assert.ok(grab(en, 'limitTightest_one').includes('{count}'), 'en needs the singular form for one');
   // English gained a singular form; Chinese has only the `other` category and
   // deliberately ships no suffix keys.
   assert.ok(grab(en, 'limitApproxRequests_one').includes('{count}'));
@@ -534,6 +542,39 @@ test('every registered component renders without throwing', () => {
       `${name} must render`,
     );
   }
+});
+
+test('the tightest-key label names how many limits it compared', async () => {
+  // The dictionary test proves the string CONTAINS `{count}`; this proves the
+  // rendered label actually substitutes it, which is what a reader sees. The
+  // branch only renders with "All keys" selected, so the pref is left unset and
+  // two limited keys are supplied — without the numeral the reader is told
+  // "tightest" with nothing to weigh it against.
+  const payload = {
+    status: 'ok', refreshedAt: '2026-10-09T09:00:00.000Z', refreshSeconds: 60,
+    todaySpend: { usd: 2.15, requests: 47 }, last7: { usd: 9, requests: 100 },
+    last30: { usd: 20, requests: 400 }, byDay: [], byModel: [], byKey: [],
+    limits: {
+      'build-bot': { limit: 12, limitRemaining: 7.2, limitReset: 'daily', disabled: false },
+      'batch-key': { limit: 25, limitRemaining: 20, limitReset: null, disabled: false },
+    },
+    limitThresholds: { warn: 0.4, critical: 0.8 },
+    burnHourly: {},
+    // A balance well clear of both keys, so the balance branch does not win.
+    credits: { totalCredits: 1000, totalUsage: 10 },
+  };
+  const stand = loadWithFetch(payload, Date.UTC(2026, 9, 9, 12, 0, 0), { 'ors.limitNotice': '1' });
+  // No `ors.keyId`: the tightest-key branch is the one for "All keys".
+  const pill = stand.mount('conversation.composer.dock', {});
+  let tree = pill.render();
+  for (let i = 0; i < 6; i += 1) { await flush(); if (pill.dirty) tree = pill.render(); }
+  const chip = findByClass(tree, 'ors-chip');
+  assert.ok(chip?.props?.onClick, 'the chip must be there to open the popover');
+  chip.props.onClick();
+  for (let i = 0; i < 6; i += 1) { await flush(); if (pill.dirty) tree = pill.render(); }
+  const text = textOf(tree).join(' | ');
+  assert.ok(/Tightest of 2 limited keys/.test(text), `the label must name the count: ${text}`);
+  assert.ok(text.includes('batch-key') || text.includes('build-bot'), `a key must be named: ${text}`);
 });
 
 test('pluralCategory reads the CLDR category, and refuses to guess', () => {
@@ -680,4 +721,187 @@ test('apply reads the active locale, and survives a host that offers neither', (
   assert.doesNotThrow(() => Object.values(slots).forEach(
     Component => Component({ t: key => key, sessionId: 'session' }),
   ), 'the components must render after a locale change');
+});
+
+/**
+ * A fuller stand than `load()`: a working React (effects run, state persists
+ * across re-renders), a counting `fetch`, and a controllable clock, so the two
+ * summary pollers can actually be mounted and watched. `load()` above is enough
+ * for pure helpers — it never renders anything — but a poll is a side effect.
+ */
+function loadWithFetch(payload, startMs, prefs = { 'ors.limitNotice': '1', 'ors.keyId': 'build-bot' }) {
+  const counters = { fetch: 0 };
+  const store = { ...prefs };
+  let now = startMs;
+  const RealDate = Date;
+  class FakeDate extends RealDate {
+    constructor(...args) { if (args.length === 0) super(now); else super(...args); }
+    static now() { return now; }
+  }
+  const windowStub = {
+    __ModuleLoader__: { load: () => {} },
+    localStorage: { getItem: key => (key in store ? store[key] : null), setItem: () => {} },
+    addEventListener: () => {},
+    removeEventListener: () => {},
+    dispatchEvent: () => {},
+  };
+  let captured;
+  windowStub.__ModuleLoader__.load = registration => { captured = registration; };
+  runInNewContext(source, {
+    window: windowStub,
+    document: { addEventListener: () => {}, removeEventListener: () => {} },
+    fetch: () => {
+      counters.fetch += 1;
+      return Promise.resolve({ ok: true, json: () => Promise.resolve(payload) });
+    },
+    setInterval: () => 0,
+    clearInterval: () => {},
+    CustomEvent: class { constructor(type) { this.type = type; } },
+    Date: FakeDate,
+    console,
+  });
+
+  // One instance: hooks persist between renders, the cursor resets each render.
+  let cursor = null;
+  let index = 0;
+  let dirty = false;
+  const hooksStub = {
+    createElement: (type, props, ...kids) => ({ type, props: props || {}, children: kids.flat(Infinity) }),
+    useRef: initial => {
+      const hook = cursor[index] || (cursor[index] = {}); index += 1;
+      if (!('ref' in hook)) hook.ref = { current: initial };
+      return hook.ref;
+    },
+    useState: initial => {
+      const hook = cursor[index] || (cursor[index] = {}); index += 1;
+      if (!('s' in hook)) hook.s = typeof initial === 'function' ? initial() : initial;
+      return [hook.s, value => { hook.s = typeof value === 'function' ? value(hook.s) : value; dirty = true; }];
+    },
+    useMemo: (fn, deps) => {
+      const hook = cursor[index] || (cursor[index] = {}); index += 1;
+      const changed = !('m' in hook) || deps === undefined
+        || deps.length !== (hook.deps || []).length
+        || deps.some((value, i) => !Object.is(value, (hook.deps || [])[i]));
+      if (changed) { hook.m = fn(); hook.deps = deps; }
+      return hook.m;
+    },
+    useCallback: fn => fn,
+    useEffect: (fn, deps) => {
+      const hook = cursor[index] || (cursor[index] = {}); index += 1;
+      const first = !('deps' in hook);
+      const changed = first || deps === undefined
+        || deps.length !== hook.deps.length
+        || deps.some((value, i) => !Object.is(value, hook.deps[i]));
+      if (changed) { hook.deps = deps; fn(); }
+    },
+  };
+
+  const api = captured.factory(specifier => {
+    if (specifier === 'react') return hooksStub;
+    throw new Error(`Unexpected browser dependency: ${specifier}`);
+  });
+  const dicts = [];
+  const slots = {};
+  api.apply({
+    effect: fn => { fn(); return () => {}; },
+    locale: { register: (ns, dict) => { dicts.push(dict); return () => {}; }, bind: () => key => key },
+    slots: {
+      inject: (name, thunk) => { thunk(); },
+      register: (definition, Component) => { slots[definition.name] = Component; return () => {}; },
+    },
+  });
+  const english = dicts.find(entry => entry.en)?.en ?? {};
+  const t = (key, params) => {
+    const template = english[key] ?? key;
+    return params ? template.replace(/\{(\w+)\}/g, (match, name) => (name in params ? String(params[name]) : match)) : template;
+  };
+  const mount = (name, extraProps = {}) => {
+    const instance = {
+      render() {
+        cursor = instance.hooks; index = 0; dirty = false;
+        return slots[name]({ t, sessionId: 'session', ...extraProps });
+      },
+      get dirty() { return dirty; },
+      hooks: [],
+    };
+    return instance;
+  };
+  return { counters, mount, advance: ms => { now += ms; }, api, slots };
+}
+
+/** The first node carrying `className`, so a test can click what it renders. */
+function findByClass(node, className) {
+  if (node === null || node === undefined || typeof node !== 'object') return undefined;
+  if (Array.isArray(node)) {
+    for (const child of node) { const hit = findByClass(child, className); if (hit !== undefined) return hit; }
+    return undefined;
+  }
+  const own = node.props?.className;
+  if (typeof own === 'string' && own.split(/\s+/).includes(className)) return node;
+  return findByClass(node.children, className);
+}
+
+/** Every text node under a tree, skipping the CSS the components inline. */
+function textOf(node, out = []) {
+  if (node === null || node === undefined || node === false) return out;
+  if (typeof node === 'string' || typeof node === 'number') { out.push(String(node)); return out; }
+  if (Array.isArray(node)) { node.forEach(child => textOf(child, out)); return out; }
+  if (node.type === 'style') return out;
+  if (node.children) textOf(node.children, out);
+  return out;
+}
+
+const flush = () => new Promise(resolve => { setTimeout(resolve, 0); });
+
+test('the two summary pollers share one request inside the coalescing window', async () => {
+  // `Pill` and `ToastOverlay` each poll the summary on their own interval. They
+  // used to issue two requests per tick for one answer; `fetchSummary` now hands
+  // callers inside `SUMMARY_COALESCE_MS` the request already in flight. This is
+  // the only test that renders a poller, so it is the only one that can see it:
+  // `fetchSummary` is not exported from the factory.
+  const payload = {
+    status: 'ok', refreshedAt: '2026-10-09T09:00:00.000Z', refreshSeconds: 60,
+    todaySpend: { usd: 2.15, requests: 47 }, last7: { usd: 9, requests: 100 },
+    last30: { usd: 20, requests: 400 }, byDay: [], byModel: [],
+    byKey: [{ id: 'build-bot', todayUsd: 2.15, todayRequests: 47, todayModels: [], last7: { usd: 9, requests: 100 }, last30: { usd: 20, requests: 400 } }],
+    limits: { 'build-bot': { limit: 12, limitRemaining: 7.2, limitReset: 'daily', disabled: false } },
+    limitThresholds: { warn: 0.4, critical: 0.8 },
+    burnHourly: { 'build-bot': [{ ts: '2026-10-09T08:00:00.000Z', usd: 1 }] },
+    credits: { totalCredits: 1000, totalUsage: 96.75 },
+  };
+
+  // Both pollers mounted in the same instant: one request between them.
+  const first = loadWithFetch(payload, Date.UTC(2026, 9, 9, 12, 0, 0));
+  const pill = first.mount('conversation.composer.dock');
+  const toast = first.mount('shell.overlay');
+  pill.render();
+  toast.render();
+  await flush();
+  assert.equal(first.counters.fetch, 1, 'two pollers mounting together must cost one request');
+
+  // A caller outside the window must fetch again rather than reuse a stale reply.
+  const second = loadWithFetch(payload, Date.UTC(2026, 9, 9, 12, 0, 0));
+  const soloPill = second.mount('conversation.composer.dock');
+  soloPill.render();
+  await flush();
+  assert.equal(second.counters.fetch, 1);
+  // Move the clock past the window: the mounted poller does not re-render on its
+  // own here (intervals are stubbed and effects only run on a change), which is
+  // exactly the "a later caller arrives" case the window has to let through.
+  second.advance(5_000);
+  const laterPill = second.mount('conversation.composer.dock');
+  laterPill.render();
+  await flush();
+  assert.equal(second.counters.fetch, 2, 'a caller past the window must fetch again');
+
+  // And a caller INSIDE the window reuses the reply rather than re-fetching.
+  const third = loadWithFetch(payload, Date.UTC(2026, 9, 9, 12, 0, 0));
+  const a = third.mount('conversation.composer.dock');
+  a.render();
+  await flush();
+  assert.equal(third.counters.fetch, 1);
+  const b = third.mount('conversation.composer.dock');
+  b.render();
+  await flush();
+  assert.equal(third.counters.fetch, 1, 'a caller inside the window must reuse the reply');
 });

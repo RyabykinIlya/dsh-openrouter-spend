@@ -936,9 +936,15 @@ window.__ModuleLoader__.load({
             note: withBurnNote(limitSentence(noticeState, money, t, activeLocaleId), burnNote),
           };
         } else if (tightest !== undefined && !balanceBinds) {
+          // The label names how many limits the pick was made from, because
+          // "tightest" is otherwise a claim with nothing to compare against: with
+          // two limited keys it is barely a choice, with twenty it means something.
+          // Counted through `tPlural` so Russian takes the right genitive.
+          const limitedCount = Object.keys(limits ?? {}).length;
           quota = {
             level: tightest.state.level,
-            key: [`${t('limitTightest')} · `, h('span', { key: 'k', style: { color: keyTint(tightest.id) } }, tightest.id)],
+            key: [`${tPlural(t, 'limitTightest', limitedCount, activeLocaleId, { count: limitedCount })} · `,
+              h('span', { key: 'k', style: { color: keyTint(tightest.id) } }, tightest.id)],
             pct: tightest.state.percent,
             note: withBurnNote(limitSentence(tightest.state, money, t, activeLocaleId), burnNote),
           };
@@ -1376,7 +1382,8 @@ window.__ModuleLoader__.load({
             limitApproxRequests: '\u2248 {count} requests',
             limitApproxRequests_one: '\u2248 {count} request',
             limitShared: 'shared by all keys',
-            limitTightest: 'Tightest limit',
+            limitTightest: 'Tightest of {count} limited keys',
+            limitTightest_one: 'Tightest of {count} limited key',
             limitUnavailable: 'Key limits unavailable: {reason}',
             limitBurnUnavailable: 'the pace of spend is unknown: {reason}',
             limitUnknownMatch: 'Limit unknown: this key\u2019s name did not match the account\u2019s key list.',
@@ -1438,7 +1445,7 @@ window.__ModuleLoader__.load({
             limitUnderADay: '按此速度不足一天',
             limitApproxRequests: '约 {count} 个请求',
             limitShared: '所有密钥共用',
-            limitTightest: '最紧张的限额',
+            limitTightest: '{count} 个限额密钥中最紧的',
             limitUnavailable: '无法获取密钥限额：{reason}',
             limitBurnUnavailable: '无法确定消耗速度：{reason}',
             limitUnknownMatch: '限额未知：该密钥名称未匹配到账户密钥列表。',
@@ -1507,7 +1514,8 @@ window.__ModuleLoader__.load({
             limitApproxRequests_one: '\u2248 {count} запрос',
             limitApproxRequests_few: '\u2248 {count} запроса',
             limitShared: 'общий для всех ключей',
-            limitTightest: 'Самый жёсткий лимит',
+            limitTightest: 'Самый жёсткий из {count} ключей с лимитом',
+            limitTightest_one: 'Самый жёсткий из {count} ключа с лимитом',
             limitUnavailable: 'Лимиты ключей недоступны: {reason}',
             limitBurnUnavailable: 'темп расхода неизвестен: {reason}',
             limitUnknownMatch: 'Лимит неизвестен: имя ключа не совпало со списком ключей аккаунта.',

@@ -191,13 +191,33 @@ present, is not shown in this state — one number beats two when the user needs
 
 `ors.keyId` empty means the user is not tracking one key, so there is no single key limit.
 The block then shows the account balance line above, and adds the tightest keyed limit only
-when that is closer than the balance:
+when that is closer than the balance. The label names how many limited keys the pick was made
+from — "tightest" is otherwise a claim with nothing to weigh it against, and the count is what
+tells the reader whether the choice meant anything (two keys, or twenty):
 
 ```
-API key limit · batch-key                                 47%
-▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬
-$6.40 of $25 left · the tightest limited key
+Tightest of 4 limited keys · batch-key                    74%
+█████████████████████████████████████████░░░░░░░░░░░░░░░
+$6.40 of $25.00 left · ~8 days at this rate
 ```
+
+The count is taken from `limits` — the keys the host reported a limit for, not every key on the
+account — and goes through the same plural selector as the sentence numerals, because Russian
+needs the genitive singular after «из» for one (`из 1 ключа`) and the genitive plural for the
+rest (`из 2 ключей`, `из 5 ключей`).
+
+Two things this branch cannot say, both by construction rather than by omission:
+
+* **Not the request count.** `avgRequestUsd` is derived from the *selected* key, and with "All
+  keys" no key is selected, so the count is unavailable and the sentence carries money and time
+  only. The lifetime `ok` row in the sentence table shows a count; this branch never will.
+* **Not the tightest key by percentage alone.** Severity outranks the percentage by design (see
+  `client.js`): a `warn` key at 40% is chosen over a lifetime key at 47%, because a lifetime cap
+  with eight days left is not the thing about to stop work. The mock above is the case where
+  both agree.
+
+Note that the money in these mocks renders to two decimals (`$25.00`), not the rounded `$25` the
+older sentence tables in this document use; the tables are the ones that are imprecise.
 
 *This is a design choice, not a constraint from the ADRs* — the alternative is to show
 nothing when no single key is selected, on the grounds that "the tightest key" is not a
@@ -308,19 +328,19 @@ New keys, with the form the Russian and Chinese blocks should take:
 | `limitKey` | `API key limit` | `Лимит ключа` | `密钥限额` |
 | `limitBalance` | `Account balance` | `Баланс аккаунта` | `账户余额` |
 | `limitLeft` | `{left} of {limit} left` | `Осталось {left} из {limit}` | `剩余 {left}，共 {limit}` |
-| `limitUsedPeriod` | `{used} of {limit} used {period}` | `Израсходовано {used} из {limit} {period}` | `{period}已用 {used}/{limit}` |
-| `limitConsumed` | `{percent}% of {period}'s {limit} used` | `Израсходовано {percent}% лимита {limit} {period}` | `{period}已用 {percent}%/{limit}` |
+| `limitConsumed` | `{percent}% used` | `израсходовано {percent}%` | `已用 {percent}%` |
 | `periodToday` | `today` | `сегодня` | `今天` |
 | `periodWeek` | `this week` | `на этой неделе` | `本周` |
 | `periodMonth` | `this month` | `в этом месяце` | `本月` |
 | `limitResets` | `resets {when}` | `сброс {when}` | `{when}重置` |
 | `limitResetsIn` | `resets in {minutes} min` | `сброс через {minutes} мин` | `{minutes} 分钟后重置` |
-| `limitLeftAtRate` | `~{duration} left at this rate` | `~{duration} при таком темпе` | `按此速度约剩 {duration}` |
+| `limitLeftAtRate` | `~{duration} at this rate` | `~{duration} при таком темпе` | `按此速度约 {duration}` |
 | `limitApproxRequests` | `≈ {count} requests` | `≈ {count} запросов` | `约 {count} 个请求` |
 | `limitDaysAtRate` | `~{days} days at this rate` | `~{days} дней при таком темпе` | `按此速度约 {days} 天` |
 | `limitUnderADay` | `under a day at this rate` | `меньше суток при таком темпе` | `按此速度不足一天` |
 | `limitShared` | `shared by all keys` | `общий для всех ключей` | `所有密钥共用` |
-| `limitTightest` | `the tightest of {count} limited keys` | `самый жёсткий из {count} ключей с лимитом` | `{count} 个限额密钥中最紧的` |
+| `limitTightest` | `Tightest of {count} limited keys` | `Самый жёсткий из {count} ключей с лимитом` | `{count} 个限额密钥中最紧的` |
+| `limitTightest_one` | `Tightest of {count} limited key` | `Самый жёсткий из {count} ключа с лимитом` | *(none — only `other`)* |
 | `limitUnavailable` | `Key limits unavailable: {reason}` | `Лимиты ключей недоступны: {reason}` | `无法获取密钥限额：{reason}` |
 | `limitUnknownMatch` | `Limit unknown: this key's name did not match the account's key list.` | `Лимит неизвестен: имя ключа не совпало со списком ключей аккаунта.` | `限额未知：该密钥名称未匹配到账户密钥列表。` |
 
