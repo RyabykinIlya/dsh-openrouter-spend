@@ -35,6 +35,7 @@
 - **芯片弹出窗口** — 时间范围和 API 密钥过滤器、今日每个模型的支出、时间窗口内的每日条形图、预付余额和累计支出。
 - **设置 → OpenRouter spend** — 存储或清除管理密钥、选择显示货币（美元或按 cbr.ru 汇率的卢布）、设置刷新间隔、按 API 密钥过滤。
 - **限额提醒** — 默认关闭。在设置中开启后，弹出窗口会显示所跟踪密钥的限额还剩多少：已用比例、按当前速度剩余额度还能用多久，以及限额何时重置。随着限额逼近，芯片上的圆点先变黄再变红，级别升级时弹出一次通知。
+- **账户余额提醒** — 预付余额按它本来的 lifetime 限额来评估：当它按账户支出的中位速度撑不到三天（不到一天——或按最近三天的平均——即为严重）时，圆点会告警，弹出窗口的余额块会说明金额、剩余时间和分母——「剩余 $6.58，共 $241 · 按此速度不足一天 · 所有密钥共用」——而不是一个孤零零的百分比，通知也会提示充值。见 [ADR 0007](https://github.com/RyabykinIlya/dsh-openrouter-spend/blob/main/docs/adr/0007-judge-the-account-balance-by-runway.md)。
 
 主机端缓存摘要 `refreshSeconds` 秒并合并并发刷新，因此任意数量的打开标签页在每个刷新窗口内只需查询 OpenRouter 一次。当刷新失败时，最后的有效数据保留在屏幕上，原因显示在空面板的位置：面板会说明故障原因，倒计时到下次自动尝试（首次失败后 15 秒，之后 30 秒，然后恢复普通间隔），并提供**立即重试**按钮以立刻重新读取。
 
@@ -54,7 +55,7 @@ dsh plugin --profile web add dsh-openrouter-spend
 从 GitHub 安装（纯 JavaScript，无构建步骤和构建脚本权限）：
 
 ```sh
-dsh plugin --profile web add github:RyabykinIlya/dsh-openrouter-spend#v0.4.1
+dsh plugin --profile web add github:RyabykinIlya/dsh-openrouter-spend#v0.5.0
 ```
 
 然后打开 Settings → OpenRouter spend 并粘贴管理密钥。

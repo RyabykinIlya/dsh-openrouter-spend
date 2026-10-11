@@ -638,6 +638,82 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * The level of the ACCOUNT BALANCE — the prepaid pool every key spends
+     * from, the unlimited ones included (ADR-0007). The key limits above answer
+     * "can this key spend"; this answers "can the ACCOUNT spend", which is the
+     * question that actually stops work on the day the pool runs dry.
+     *
+     * The balance never refills on a schedule — only a top-up moves it — so it
+     * is a lifetime cap by shape and is judged by the same runway metric: the
+     * remainder over the median daily account burn. The burn is the union of
+     * every key's hourly window, unlimited keys included, because the pool is
+     * shared: a key with `limit: null` is exactly the one that can drain it.
+     *
+     * One deliberate asymmetry with `limitState`: no hysteresis on the recent
+     * escalation below. The median moves only when a UTC day boundary crosses a
+     * bucket in or out of the window, so the level cannot flicker on a poll the
+     * way a consumed share can, and a margin here would only delay the one
+     * warning this function exists to raise.
+     */
+    function balanceState(input) {
+      const { credits, burn, nowMs = Date.now(), previous } = input ?? {};
+      const total = Number(credits?.totalCredits);
+      const used = Number(credits?.totalUsage);
+      if (!Number.isFinite(total) || !Number.isFinite(used)) return { level: 'none' };
+      const balance = Math.max(0, total - used);
+      const shared = {
+        lifetime: true,
+        balanceUsd: balance,
+        remainingUsd: balance,
+        // `of {limit} left` reads as "of what was ever credited", which is the
+        // honest denominator for a pool that only refills by hand.
+        limitUsd: total,
+        // The consumed share of the credited total — the percentage the balance
+        // block shows, so its meter fills like the key meters instead of
+        // counting down a number nobody recognises.
+        percent: total > 0 ? Math.min(100, Math.max(0, (used / total) * 100)) : undefined,
+      };
+      if (!(balance > 0)) {
+        // A pool at or past zero stops work now; no window can make that mild.
+        return { level: 'critical', ...shared };
+      }
+      // `burnHourly` arrives keyed by key; the pool question needs the union.
+      const burnList = Array.isArray(burn) ? burn
+        : Object.values(burn ?? {}).flatMap(list => (Array.isArray(list) ? list : []));
+      const days = closedDayTotals(windowedBurn(burnList, nowMs), nowMs);
+      if (days.length < LIMIT_MIN_CLOSED_DAYS) return { level: 'none', ...shared };
+      const perDay = median(days);
+      if (!(perDay > 0)) return { level: 'none', ...shared };
+      const runwayDays = balance / perDay;
+      let level = runwayDays <= 1 + LIMIT_EPSILON ? 'critical' : runwayDays <= 3 + LIMIT_EPSILON ? 'warn' : 'none';
+      // Hysteresis in whole days, same margins and same reason as the lifetime
+      // key branch: a median sitting on the boundary must not flicker the dot.
+      if (level === 'none' && previous === 'warn' && runwayDays <= LIFETIME_LEAVE_WARN_DAYS + LIMIT_EPSILON) level = 'warn';
+      if (level === 'warn' && previous === 'critical' && runwayDays <= LIFETIME_LEAVE_CRITICAL_DAYS + LIMIT_EPSILON) level = 'critical';
+      // The recent-pace escalation: a ramp spends the pool faster than the
+      // seven-day median admits, and the median would notice a week late —
+      // after the pool is gone. The mean of the last three closed days is the
+      // noisiest short window worth trusting; it can only escalate, never
+      // quiet a level the median raised, because a quiet weekend must not
+      // talk the alarm down. When it escalates, the published runway switches
+      // to its own pace, so the sentence's days agree with the level beside
+      // them — "~6 days at this rate" beside a critical meter would read as
+      // a contradiction.
+      let runwayOf = perDay;
+      if (level !== 'critical') {
+        const recent = days.slice(-3);
+        const recentPerDay = recent.reduce((sum, value) => sum + value, 0) / recent.length;
+        if (recentPerDay > 0) {
+          const recentRunwayDays = balance / recentPerDay;
+          if (recentRunwayDays <= 1 + LIMIT_EPSILON) level = 'critical';
+          else if (level === 'none' && recentRunwayDays <= 3 + LIMIT_EPSILON) level = 'warn';
+          if (recentPerDay > perDay) runwayOf = recentPerDay;
+        }
+      }
+      return { level, ...shared, perDayUsd: runwayOf, runwayDays: balance / runwayOf };
+    }
+
+    /**
      * The CLDR plural category for `count` in `localeId`.
      *
      * The dictionary layer is a flat map with `{name}` substitution and no plural
@@ -784,6 +860,11 @@ window.__ModuleLoader__.load({
      * `no-credential` stay visible — and a limit level outranks `stale`, because
      * stale figures beside an exhausted cap still need to say so.
      *
+     * `balanceLevel` (ADR-0007) can only raise, never lower what the tracked
+     * key's own level shows: a pool with under a day left stops work before any
+     * key limit does, so it holds the dot even while the tracked key looks
+     * healthy. No parameter means `none`, which is the old behaviour exactly.
+     *
      * `error` stays mapped although today's host turns its 502s into client
      * failures before a payload is ever rendered (N1): the mapping describes
      * the status vocabulary the route documents, and a host that ever serves
@@ -791,10 +872,14 @@ window.__ModuleLoader__.load({
      * CSS rule; the alternative is a status the wire can name but the dot
      * cannot show.
      */
-    function dotState(status, level) {
+    function dotState(status, level, balanceLevel) {
       if (status === 'error' || status === 'no-credential') return status;
-      if (level === 'critical') return 'limit-critical';
-      if (level === 'warn') return 'limit-warn';
+      // The stricter of the two alarms holds the dot: rank and compare, so a
+      // healthy key cannot amber over a nearly-empty pool and vice versa.
+      const rank = { critical: 2, warn: 1, none: 0 };
+      const effective = (rank[balanceLevel] ?? 0) > (rank[level] ?? 0) ? balanceLevel : level;
+      if (effective === 'critical') return 'limit-critical';
+      if (effective === 'warn') return 'limit-warn';
       return status ?? 'loading';
     }
 
@@ -1004,20 +1089,35 @@ window.__ModuleLoader__.load({
         ? fmtDuration(state.runwayDays * MS_PER_DAY)
         : undefined;
 
-      const message = estimate !== undefined
-        ? t(level === 'critical' ? 'limitToastCritical' : 'limitToastWarn', {
+      // The balance toast (ADR-0007) speaks in money and days, not in a
+      // percentage of a period the pool does not have: there is no period.
+      // {left} is the remaining balance and {limit} the total ever credited,
+      // the same "of what was ever credited" reading the popover sentence has.
+      const message = props.balance === true
+        ? (estimate !== undefined
+          ? t(level === 'critical' ? 'limitToastBalanceCritical' : 'limitToastBalanceWarn', {
+            left: money.fmt(state.remainingUsd),
+            limit: money.fmt(state.limitUsd),
+            estimate,
+          })
+          : t(level === 'critical' ? 'limitToastBalanceCriticalNoEstimate' : 'limitToastBalanceWarnNoEstimate', {
+            left: money.fmt(state.remainingUsd),
+            limit: money.fmt(state.limitUsd),
+          }))
+        : (estimate !== undefined
+          ? t(level === 'critical' ? 'limitToastCritical' : 'limitToastWarn', {
             name: keyId,
             percent,
             period,
             limit,
             estimate,
           })
-        : t(level === 'critical' ? 'limitToastCriticalNoEstimate' : 'limitToastWarnNoEstimate', {
+          : t(level === 'critical' ? 'limitToastCriticalNoEstimate' : 'limitToastWarnNoEstimate', {
             name: keyId,
             percent,
             period,
             limit,
-          });
+          }));
 
       return h('div', { className: 'ors-toast' },
         h('style', null, CSS),
@@ -1042,6 +1142,11 @@ window.__ModuleLoader__.load({
       // The limit warning is opt-in, and reads the same store Settings writes.
       const [noticeOn, setNoticeOn] = useState(readLimitNotice);
       const rootRef = useRef(null);
+      // The previous BALANCE level, for `balanceState`'s hysteresis. Kept apart
+      // from the key level ref on purpose: the two metrics move on different
+      // inputs, and a top-up must be able to quiet the balance alarm even while
+      // the tracked key sits at the same level.
+      const balanceLevelRef = useRef('none');
       // The previous level, so `limitState` can apply its hysteresis without
       // becoming stateful. A ref and not state: it must not trigger a render.
       // The history also names the key it belongs to: a key switch must not
@@ -1187,6 +1292,24 @@ window.__ModuleLoader__.load({
         if (noticeState === undefined) return;
         levelRef.current = { keyId, level: noticeState.level };
       });
+      // The account balance is its own cap (ADR-0007): the pool every key
+      // spends from, judged by the same runway metric a lifetime key limit is.
+      // Computed from data the summary already carries — `credits` and the
+      // union of `burnHourly` — so the feature adds no request of its own.
+      const balanceNotice = noticeOn && data !== null && data?.credits !== undefined
+        ? balanceState({
+          credits: data.credits,
+          burn: data?.burnHourly,
+          previous: balanceLevelRef.current,
+        })
+        : undefined;
+      // Carry the balance level forward the same way the key level rides its
+      // ref, for the same reason: the hysteresis needs a previous, and state
+      // would re-render on a figure nothing displays.
+      useEffect(() => {
+        if (balanceNotice === undefined) return;
+        balanceLevelRef.current = balanceNotice.level;
+      });
       // When the popover opens, mark the current level as seen, in the period
       // the cap is currently running (M2: the design doc's key). This effect must
       // stay *below* the `noticeState` declaration: its dependency array is read
@@ -1225,14 +1348,32 @@ window.__ModuleLoader__.load({
           })[0]
         : undefined;
 
-      // One block, three shapes. It reports what is known and names the gap when
-      // nothing is — a missing limit must never read as a healthy one. The shared
-      // pool is informational rather than alarmed: ADR-0001's thresholds are
-      // about a cap that refills, and the account balance is not that.
+      // One block, four shapes. It reports what is known and names the gap when
+      // nothing is — a missing limit must never read as a healthy one.
+      //
+      // The account balance used to be shown as information only (ADR-0007
+      // supersedes that reading): a bare "3% left · shared by all keys" that
+      // told the reader neither what the percent was of, nor how long the
+      // money lasts. The balance is now judged by the same runway metric as a
+      // lifetime key limit, and when it is the stricter alarm it takes the
+      // block — with days in the sentence, a consumed meter beside it, and a
+      // tooltip saying what the pool is.
       let quota;
       if (noticeOn && data !== null) {
         const balanceBinds = balance !== undefined && keyLimit !== undefined
           && balance < keyLimit.limitRemaining;
+        const levelRank = { critical: 2, warn: 1, none: 0 };
+        const balanceLevel = balanceNotice?.level ?? 'none';
+        const keyLevel = noticeState?.level ?? 'none';
+        // The balance takes the block when it is the stricter alarm — the pool
+        // stops work before any key limit does — or when nothing else has a
+        // block to show. One number beats two: the key limit stays hidden in
+        // this shape, because "top up" is the action and the key's remainder
+        // is not what decides it.
+        const balanceTakes = balance !== undefined
+          && (levelRank[balanceLevel] > levelRank[keyLevel]
+            || balanceBinds
+            || (keyId === '' && tightest === undefined));
         if (limitUnknown) {
           quota = {
             level: 'unknown',
@@ -1241,6 +1382,21 @@ window.__ModuleLoader__.load({
             note: data.limitsError !== undefined
               ? t('limitUnavailable', { reason: data.limitsError })
               : t('limitUnknownMatch'),
+          };
+        } else if (balanceTakes) {
+          // The sentence speaks in money and days: "… of … left · ~N days at
+          // this rate", with "shared by all keys" naming the pool, because
+          // that is what the reader came for and what the block used to omit.
+          const sentence = balanceNotice !== undefined
+            ? limitSentence(balanceNotice, money, t, activeLocaleId)
+            : undefined;
+          const parts = [sentence, t('limitShared')].filter(part => part !== undefined);
+          quota = {
+            level: balanceLevel,
+            key: t('limitBalance'),
+            hint: t('limitBalanceHint'),
+            pct: balanceNotice?.percent,
+            note: withBurnNote(parts.join(' \u00b7 '), burnNote),
           };
         } else if (keyLimit !== undefined && !balanceBinds) {
           quota = {
@@ -1261,14 +1417,6 @@ window.__ModuleLoader__.load({
               h('span', { key: 'k', style: { color: keyTint(tightest.id) } }, tightest.id)],
             pct: tightest.state.percent,
             note: withBurnNote(limitSentence(tightest.state, money, t, activeLocaleId), burnNote),
-          };
-        } else if (balanceBinds || (keyId === '' && balance !== undefined)) {
-          const total = data.credits?.totalCredits;
-          quota = {
-            level: 'none',
-            key: t('limitBalance'),
-            pct: Number.isFinite(total) && total > 0 ? (balance / total) * 100 : undefined,
-            note: t('limitShared'),
           };
         }
       }
@@ -1294,12 +1442,13 @@ window.__ModuleLoader__.load({
         h('span', {
           className: 'ors-chip-dot',
           role: 'img',
-          'data-state': dotState(dotStatus, noticeState?.level),
+          'data-state': dotState(dotStatus, noticeState?.level, balanceNotice?.level),
           // The dot is the only at-a-glance signal, so its colour is always
           // doubled by a label naming the level — or, when there is no level to
-          // name, by the reason the figures are stale.
-          'aria-label': noticeState?.level === 'critical' ? t('limitLevelCritical')
-            : noticeState?.level === 'warn' ? t('limitLevelWarn')
+          // name, by the reason the figures are stale. The label names the
+          // stricter of the two alarms, matching the colour `dotState` picked.
+          'aria-label': (noticeState?.level === 'critical' || balanceNotice?.level === 'critical') ? t('limitLevelCritical')
+            : (noticeState?.level === 'warn' || balanceNotice?.level === 'warn') ? t('limitLevelWarn')
             : failureText,
         }),
         h('span', { className: 'ors-chip-amount' },
@@ -1328,7 +1477,14 @@ window.__ModuleLoader__.load({
               'aria-pressed': range === id,
               onClick: () => setRange(id),
             }, id === 'today' ? t('today') : id === 'last7' ? t('last7') : t('last30')))),
-          quota === undefined ? null : h('div', { className: 'ors-quota', 'data-level': quota.level },
+          quota === undefined ? null : h('div', {
+            className: 'ors-quota',
+            'data-level': quota.level,
+            // The balance block's only explanation of what the pool IS: the
+            // percentage alone says "3%" of nothing in particular, so the hint
+            // rides along as a tooltip rather than as a second sentence.
+            title: quota.hint,
+          },
             h('div', { className: 'ors-quota-head' },
               h('span', { className: 'ors-quota-key ors-label' }, quota.key),
               h('span', { className: 'ors-quota-pct' },
@@ -1410,10 +1566,17 @@ window.__ModuleLoader__.load({
       const [currency, setCurrency] = useState(readCurrency);
       const [noticeOn, setNoticeOn] = useState(readLimitNotice);
       const [seenLimit, setSeenLimit] = useState(() => readSeenLimit());
-      const [toastLevel, setToastLevel] = useState('none');
+      // The live toast: `{ kind: 'key' | 'balance', level }`. A key toast names
+      // the tracked key; a balance toast (ADR-0007) names the pool, and its
+      // seen-key is written under the id `balance`. One live toast at a time:
+      // a newer escalation replaces the previous, whichever kind it is.
+      const [toast, setToast] = useState(null);
       // The escalation history, scoped to the tracked key (m10): the old key's
       // level must not decide the new key's hysteresis or swallow its toast.
       const levelRef = useRef({ keyId: '', level: 'none' });
+      // The balance's own escalation history. It is not scoped to any key — the
+      // pool is shared — so a plain level rides the ref.
+      const balanceLevelRef = useRef('none');
       // The overlay has no interval preference of its own: it reads on the
       // host's schedule, which is the same one the chip follows.
       const { data } = useSummaryPoll(0);
@@ -1450,54 +1613,99 @@ window.__ModuleLoader__.load({
           thresholds: data?.limitThresholds,
         })
         : undefined;
+      // The balance alarm rides the same poll (ADR-0007): the pool every key
+      // spends from, unlimited keys included, judged by the same runway metric.
+      const balanceNotice = noticeOn && data !== null && data?.credits !== undefined
+        ? balanceState({
+          credits: data.credits,
+          burn: data?.burnHourly,
+          previous: balanceLevelRef.current,
+        })
+        : undefined;
 
       // A toast belongs to the key it escalated on. When the tracked key
       // changes, retire it rather than re-render the old escalation against
       // the new key's figures; a fresh escalation for the new key re-fires in
       // the effect below. Declared above that effect so the reset lands first
-      // within one commit.
-      useEffect(() => { setToastLevel('none'); }, [keyId]);
+      // within one commit. The BALANCE toast survives the switch: the pool did
+      // not change with the tracked key, so neither does its escalation.
+      useEffect(() => { setToast(value => (value === null || value.kind === 'key' ? null : value)); }, [keyId]);
 
-      // Carry the level forward and read the escalation in one pass: the previous
-      // level must be captured before it is overwritten, and two effects cannot
-      // promise that order — the first one to run would hand the second the
-      // current level as its own history, and no escalation would ever fire.
+      // Carry the levels forward and read both escalations in one pass: the
+      // previous level must be captured before it is overwritten, and two
+      // effects cannot promise that order — the first one to run would hand
+      // the second the current level as its own history, and no escalation
+      // would ever fire.
       useEffect(() => {
-        if (noticeState === undefined) return;
-        const current = noticeState.level;
-        const previous = levelRef.current.keyId === keyId ? levelRef.current.level : 'none';
-        levelRef.current = { keyId, level: current };
-        if (!noticeOn || keyId === '') return;
-        // The seen key names the period the cap is running in (M2), so a
-        // dismissal last period does not silence this one: a budget that
-        // refilled is genuinely new and must be allowed to warn again.
-        if (escalates(previous, current) && seenLimit !== seenLimitKey(keyId, current, noticeState.limitReset)) {
-          setToastLevel(current);
+        if (noticeState !== undefined) {
+          const current = noticeState.level;
+          const previous = levelRef.current.keyId === keyId ? levelRef.current.level : 'none';
+          levelRef.current = { keyId, level: current };
+          // The seen key names the period the cap is running in (M2), so a
+          // dismissal last period does not silence this one: a budget that
+          // refilled is genuinely new and must be allowed to warn again.
+          if (noticeOn && keyId !== ''
+            && escalates(previous, current) && seenLimit !== seenLimitKey(keyId, current, noticeState.limitReset)) {
+            setToast({ kind: 'key', level: current });
+          }
+        }
+        if (balanceNotice !== undefined) {
+          const current = balanceNotice.level;
+          const previous = balanceLevelRef.current;
+          balanceLevelRef.current = current;
+          // The balance never refills on a schedule, so its seen key has no
+          // period to turn: `ever` is the anchor, and only a real top-up
+          // (which moves `balanceUsd` and usually de-escalates the level)
+          // re-arms it. The pool's alarm outranks a key's when both fire in
+          // one commit — the pool stops work first.
+          if (noticeOn
+            && escalates(previous, current) && seenLimit !== seenLimitKey('balance', current, undefined)) {
+            setToast({ kind: 'balance', level: current });
+          }
         }
       });
 
       const money = makeMoney(currency, data?.rate?.perUsd);
 
-      const handleDismiss = useCallback(() => {
-        if (keyId !== '' && toastLevel !== 'none') {
-          writeSeenLimit(keyId, toastLevel, noticeState?.limitReset);
-          setToastLevel('none');
+      // Retire the live toast and record the level as seen, in the period the
+      // cap it named is running. The balance's `limitReset` is undefined, so
+      // its seen key lands on the literal `ever` — one dismissal holds until
+      // the balance itself moves.
+      const retireToast = useCallback(() => {
+        if (toast === null) return;
+        if (toast.kind === 'balance') {
+          writeSeenLimit('balance', toast.level, undefined);
+        } else {
+          writeSeenLimit(keyId, toast.level, noticeState?.limitReset);
         }
-      }, [keyId, toastLevel, noticeState?.limitReset]);
+        setToast(null);
+      }, [keyId, toast, noticeState?.limitReset]);
+
+      const handleDismiss = useCallback(() => { retireToast(); }, [retireToast]);
 
       const handleOpen = useCallback(() => {
         window.dispatchEvent(new CustomEvent(EVENT_OPEN_POPOVER));
-        if (keyId !== '' && toastLevel !== 'none') {
-          writeSeenLimit(keyId, toastLevel, noticeState?.limitReset);
-          setToastLevel('none');
-        }
-      }, [keyId, toastLevel, noticeState?.limitReset]);
+        retireToast();
+      }, [retireToast]);
 
-      if (!noticeOn || toastLevel === 'none' || !noticeState) return null;
+      if (!noticeOn || toast === null) return null;
+      if (toast.kind === 'balance') {
+        return h(Toast, {
+          balance: true,
+          keyId: 'balance',
+          level: toast.level,
+          state: balanceNotice,
+          money,
+          t,
+          onDismiss: handleDismiss,
+          onOpen: handleOpen,
+        });
+      }
+      if (!noticeState) return null;
 
       return h(Toast, {
         keyId,
-        level: toastLevel,
+        level: toast.level,
         state: noticeState,
         money,
         t,
@@ -1654,6 +1862,7 @@ window.__ModuleLoader__.load({
       // factory and reach them. The harness's own packages expose render pieces
       // the same way; `client.js` cannot be an ES module, so this is the seam.
       limitState,
+      balanceState,
       limitSentence,
       chipPairFor,
       pluralCategory,
@@ -1751,6 +1960,9 @@ window.__ModuleLoader__.load({
             limitApproxRequests: '\u2248 {count} requests',
             limitApproxRequests_one: '\u2248 {count} request',
             limitShared: 'shared by all keys',
+            // The balance block's own explanation: the percentage alone says
+            // "3%" of nothing in particular, so the tooltip names the pool.
+            limitBalanceHint: 'Prepaid pool shared by every key; refills only when you top up.',
             limitTightest: 'Tightest of {count} limited keys',
             limitTightest_one: 'Tightest of {count} limited key',
             limitUnavailable: 'Key limits unavailable: {reason}',
@@ -1773,6 +1985,13 @@ window.__ModuleLoader__.load({
             limitToastCritical: 'Key "{name}" is nearly exhausted: {percent}% of {period}\u2019s {limit} \u2014 ~{estimate} left at this rate.',
             limitToastWarnNoEstimate: 'Key "{name}" is running low: {percent}% of {period}\u2019s {limit}.',
             limitToastCriticalNoEstimate: 'Key "{name}" is nearly exhausted: {percent}% of {period}\u2019s {limit}.',
+            // The balance toast (ADR-0007): money and days, never a percentage
+            // of a period the pool does not have. {limit} is the total ever
+            // credited — the honest denominator for a pool that refills by hand.
+            limitToastBalanceWarn: 'Account balance is running low: {left} of {limit} left \u2014 ~{estimate} at the recent pace.',
+            limitToastBalanceCritical: 'Account balance is nearly exhausted: {left} of {limit} left \u2014 ~{estimate} at the recent pace. Top up to keep working.',
+            limitToastBalanceWarnNoEstimate: 'Account balance is running low: {left} of {limit} left.',
+            limitToastBalanceCriticalNoEstimate: 'Account balance is nearly exhausted: {left} of {limit} left. Top up to keep working.',
             limitToastDismiss: 'Dismiss',
           },
           zh: {
@@ -1834,6 +2053,7 @@ window.__ModuleLoader__.load({
             limitUnderADay: '按此速度不足一天',
             limitApproxRequests: '约 {count} 个请求',
             limitShared: '所有密钥共用',
+            limitBalanceHint: '所有密钥共用的预付池；仅手动充值。',
             limitTightest: '{count} 个限额密钥中最紧的',
             limitUnavailable: '无法获取密钥限额：{reason}',
             sessionsUnavailable: '无法获取按会话的支出，芯片只显示一个数值：{reason}',
@@ -1851,6 +2071,10 @@ window.__ModuleLoader__.load({
             limitToastCritical: '密钥"{name}"限额即将耗尽：已用{period}{limit}的{percent}% — 按此速度约剩{estimate}。',
             limitToastWarnNoEstimate: '密钥"{name}"限额偏低：已用{period}{limit}的{percent}%。',
             limitToastCriticalNoEstimate: '密钥"{name}"限额即将耗尽：已用{period}{limit}的{percent}%。',
+            limitToastBalanceWarn: '账户余额偏低：{limit} 中剩余 {left} — 按此速度约 {estimate}。',
+            limitToastBalanceCritical: '账户余额即将耗尽：{limit} 中剩余 {left} — 按此速度约 {estimate}。请充值以继续使用。',
+            limitToastBalanceWarnNoEstimate: '账户余额偏低：{limit} 中剩余 {left}。',
+            limitToastBalanceCriticalNoEstimate: '账户余额即将耗尽：{limit} 中剩余 {left}。请充值以继续使用。',
             limitToastDismiss: '关闭',
           },
           ru: {
@@ -1919,6 +2143,7 @@ window.__ModuleLoader__.load({
             limitApproxRequests_one: '\u2248 {count} запрос',
             limitApproxRequests_few: '\u2248 {count} запроса',
             limitShared: 'общий для всех ключей',
+            limitBalanceHint: 'Предоплаченный пул, общий для всех ключей; пополняется только вручную.',
             limitTightest: 'Самый жёсткий из {count} ключей с лимитом',
             limitTightest_one: 'Самый жёсткий из {count} ключа с лимитом',
             limitUnavailable: 'Лимиты ключей недоступны: {reason}',
@@ -1937,6 +2162,10 @@ window.__ModuleLoader__.load({
             limitToastCritical: 'Лимит ключа "{name}" почти исчерпан: израсходовано {percent}% лимита {period} ({limit}) — при таком темпе осталось ~{estimate}.',
             limitToastWarnNoEstimate: 'Лимит ключа "{name}" подходит к концу: израсходовано {percent}% лимита {period} ({limit}).',
             limitToastCriticalNoEstimate: 'Лимит ключа "{name}" почти исчерпан: израсходовано {percent}% лимита {period} ({limit}).',
+            limitToastBalanceWarn: 'Баланс аккаунта подходит к концу: осталось {left} из {limit} — при таком темпе ~{estimate}.',
+            limitToastBalanceCritical: 'Баланс аккаунта почти исчерпан: осталось {left} из {limit} — при таком темпе ~{estimate}. Пополните, чтобы продолжить работу.',
+            limitToastBalanceWarnNoEstimate: 'Баланс аккаунта подходит к концу: осталось {left} из {limit}.',
+            limitToastBalanceCriticalNoEstimate: 'Баланс аккаунта почти исчерпан: осталось {left} из {limit}. Пополните, чтобы продолжить работу.',
             limitToastDismiss: 'Закрыть',
           },
         });

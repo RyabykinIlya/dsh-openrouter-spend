@@ -173,19 +173,47 @@ inventing a forecast.
 
 ### When the account balance is the binding cap
 
-`headroom = min(key limit_remaining, account balance)` per ADR-0002. When the balance is
-smaller, the block says so, because "the key has $5 left" is misleading when the shared pool
-is nearly gone:
+The account balance — `/credits`'s `total_credits − total_usage` — is a cap in
+its own right, not a footnote to the key limits: it is the prepaid pool every
+key spends from, the unlimited ones included, and it refills only by hand. It
+is judged by its own runway metric ([ADR-0007](../adr/0007-judge-the-account-balance-by-runway.md)),
+on the account's union burn:
+
+* the level is the balance's runway in days at the median daily account burn
+  over the trailing 7-day window, closed UTC days only, today excluded —
+  warn ≤ 3 days, critical ≤ 1, same hysteresis as the lifetime key branch;
+* an escalation: a **mean of the last 3 closed days** that leaves ≤ 1 day of
+  runway is `critical` regardless of the median — a ramp spends the pool
+  faster than the median admits, and the escalation can only raise a level,
+  never quiet one;
+* fewer than 3 closed days, or a zero median, means `none` — no alarm on a new
+  install; a balance at or past zero is `critical` outright.
+
+When the balance is the stricter alarm — or when nothing else has a block to
+show — the block is the balance's:
 
 ```
-Account balance                                          88%
-██████████████████████████████████████████████████████████████
-$1.68 of $14.00 left · shared by all keys
+Account balance                                               97%
+████████████████████████████████████████████████████████████░░
+$6.58 of $241 left · ~1 day at this rate · shared by all keys
 ```
 
-The label changes to `Account balance`, the meter shows the balance against the account's
-total, and the sentence names the shared-pool fact rather than a reset. The key limit, when
-present, is not shown in this state — one number beats two when the user needs to act.
+The label is `Account balance`, and the block carries the `limitBalanceHint`
+tooltip naming what the pool is — "3%" alone names no denominator, which is
+the confusion the old line produced. The meter fills with the **consumed**
+share of the credited total (`$234 of $241` is 97% consumed), matching the key
+meters' direction, and the sentence states money, days, and the shared-pool
+fact in that order, because the money is what the reader came for. In this
+state the key limit is not shown: one number beats two, and "top up" is the
+action either way.
+
+The dot carries the **stricter of the two alarms** — a key at a healthy 31% of
+its own daily cap does not paint the dot blue while the pool behind it has a
+day left; the pool is what stops work first. A balance toast fires on the same
+escalation rule as the key toast, retires on the same dismiss and
+open-popover paths, is seen-keyed under the id `balance` with the `ever`
+anchor, survives a tracked-key switch, and outranks a key toast that fires in
+the same commit.
 
 ### With "All keys" selected
 
@@ -339,6 +367,7 @@ New keys, with the form the Russian and Chinese blocks should take:
 | `limitDaysAtRate` | `~{days} days at this rate` | `~{days} дней при таком темпе` | `按此速度约 {days} 天` |
 | `limitUnderADay` | `under a day at this rate` | `меньше суток при таком темпе` | `按此速度不足一天` |
 | `limitShared` | `shared by all keys` | `общий для всех ключей` | `所有密钥共用` |
+| `limitBalanceHint` | `Prepaid pool shared by every key; refills only when you top up.` | `Предоплаченный пул, общий для всех ключей; пополняется только вручную.` | `所有密钥共用的预付池；仅手动充值。` |
 | `limitTightest` | `Tightest of {count} limited keys` | `Самый жёсткий из {count} ключей с лимитом` | `{count} 个限额密钥中最紧的` |
 | `limitTightest_one` | `Tightest of {count} limited key` | `Самый жёсткий из {count} ключа с лимитом` | *(none — only `other`)* |
 | `limitUnavailable` | `Key limits unavailable: {reason}` | `Лимиты ключей недоступны: {reason}` | `无法获取密钥限额：{reason}` |
@@ -379,6 +408,10 @@ it, so the percentage and the cap have to be in the sentence itself. `{name}` is
 | `limitToastCritical` | `Key "{name}" is nearly exhausted: {percent}% of {period}'s {limit} — ~{estimate} left at this rate.` | `Лимит ключа "{name}" почти исчерпан: израсходовано {percent}% лимита {period} ({limit}) — при таком темпе осталось ~{estimate}.` | `密钥"{name}"限额即将耗尽：已用{period}{limit}的{percent}% — 按此速度约剩{estimate}。` |
 | `limitToastWarnNoEstimate` | `Key "{name}" is running low: {percent}% of {period}'s {limit}.` | `Лимит ключа "{name}" подходит к концу: израсходовано {percent}% лимита {period} ({limit}).` | `密钥"{name}"限额偏低：已用{period}{limit}的{percent}%。` |
 | `limitToastCriticalNoEstimate` | `Key "{name}" is nearly exhausted: {percent}% of {period}'s {limit}.` | `Лимит ключа "{name}" почти исчерпан: израсходовано {percent}% лимита {period} ({limit}).` | `密钥"{name}"限额即将耗尽：已用{period}{limit}的{percent}%。` |
+| `limitToastBalanceWarn` | `Account balance is running low: {left} of {limit} left — ~{estimate} at the recent pace.` | `Баланс аккаунта подходит к концу: осталось {left} из {limit} — при таком темпе ~{estimate}.` | `账户余额偏低：{limit} 中剩余 {left} — 按此速度约 {estimate}。` |
+| `limitToastBalanceCritical` | `Account balance is nearly exhausted: {left} of {limit} left — ~{estimate} at the recent pace. Top up to keep working.` | `Баланс аккаунта почти исчерпан: осталось {left} из {limit} — при таком темпе ~{estimate}. Пополните, чтобы продолжить работу.` | `账户余额即将耗尽：{limit} 中剩余 {left} — 按此速度约 {estimate}。请充值以继续使用。` |
+| `limitToastBalanceWarnNoEstimate` | `Account balance is running low: {left} of {limit} left.` | `Баланс аккаунта подходит к концу: осталось {left} из {limit}.` | `账户余额偏低：{limit} 中剩余 {left}。` |
+| `limitToastBalanceCriticalNoEstimate` | `Account balance is nearly exhausted: {left} of {limit} left. Top up to keep working.` | `Баланс аккаунта почти исчерпан: осталось {left} из {limit}. Пополните, чтобы продолжить работу.` | `账户余额即将耗尽：{limit} 中剩余 {left}。请充值以继续使用。` |
 | `limitToastDismiss` | `Dismiss` | `Закрыть` | `关闭` |
 
 The `*NoEstimate` pair exists because a failed hourly read leaves no runway to name (§5 of
@@ -482,5 +515,6 @@ these hex values; that needs the GUI, and was measured once here.
 * No automatic mitigation — the plugin does not switch keys, disable one, or raise a limit.
   It reports.
 * No history of limit changes; only the current value from the last poll.
-* No forecast across keys — each key is judged on its own series.
+* No forecast across keys — each key is judged on its own series, and the balance on the
+  account's union burn (ADR-0007); neither extrapolates a pace into a projected total.
 * No per-model limit awareness; OpenRouter's limits are per key.

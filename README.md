@@ -36,6 +36,7 @@
 - **Chip popover** — range and API-key filters, today's spend per model, a daily bar chart across the window, prepaid balance and lifetime spend.
 - **Settings → OpenRouter spend** — store or clear the management key, pick the display currency (USD, or RUB at the cbr.ru rate), set the refresh interval, filter by API key.
 - **Limit warning** — off by default. Turn it on in Settings and the popover shows how much of the tracked key's limit is left: the share consumed, how long the remainder lasts at the current pace, and when the cap refills. The chip's dot turns amber and then red as the cap approaches, and a toast fires once when the level escalates.
+- **Account balance warning** — the prepaid balance is judged like the lifetime cap it is: when it buys under three days at the median account pace (under one day, or at the mean of the last three days, is critical) the dot alarms, the popover's balance block says the money, the days and the denominator — `$6.58 of $241 left · under a day at this rate · shared by all keys` — instead of a bare percent, and a toast says to top up. See [ADR 0007](https://github.com/RyabykinIlya/dsh-openrouter-spend/blob/main/docs/adr/0007-judge-the-account-balance-by-runway.md).
 
 The host half caches the summary for `refreshSeconds` and coalesces concurrent refreshes, so any number of open tabs cost one OpenRouter query per refresh window. When a refresh fails, the last good figures stay on screen and the reason is shown instead of an empty panel: the popover names the fault, counts down to the next automatic attempt (15 seconds after the first failure, then 30, then the ordinary interval), and offers **Retry now** to read again immediately.
 
@@ -55,7 +56,7 @@ dsh plugin --profile web add dsh-openrouter-spend
 From GitHub (plain JavaScript, no build step and no build-script permission):
 
 ```sh
-dsh plugin --profile web add github:RyabykinIlya/dsh-openrouter-spend#v0.4.1
+dsh plugin --profile web add github:RyabykinIlya/dsh-openrouter-spend#v0.5.0
 ```
 
 Then open Settings → OpenRouter spend and paste the management key.

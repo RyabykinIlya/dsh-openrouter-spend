@@ -42,7 +42,7 @@ function load() {
 }
 
 const api = load();
-const { limitState, limitSentence, chipPairFor, pluralCategory, tPlural, withBurnNote, dotState, escalates, toastPeriodKey, periodStartKey, seenLimitKey, fmtDuration, nextResetMs, resetTextFor, median, peakHourlyBurn, windowedBurn, closedDayTotals } = api;
+const { limitState, balanceState, limitSentence, chipPairFor, pluralCategory, tPlural, withBurnNote, dotState, escalates, toastPeriodKey, periodStartKey, seenLimitKey, fmtDuration, nextResetMs, resetTextFor, median, peakHourlyBurn, windowedBurn, closedDayTotals } = api;
 
 /** Burn buckets for `closedDayTotals`: `days` full UTC days ending before `nowMs`. */
 function burnFor(nowMs, perDay, days) {
@@ -1617,4 +1617,251 @@ test('every key the design doc names exists in the code', () => {
   const rows = docRows();
   const absent = [...rows.keys()].filter(key => !union.has(key)).sort();
   assert.deepEqual(absent, [], 'a documented key must exist in the shipped dictionary');
+});
+
+// ---------------------------------------------------------------------------
+// ADR-0007: the account balance is judged by runway, not shown as information
+// only. The measured account that forced the decision: a $6.58 pool against
+// $241 ever credited, a key at a healthy 31% of its own daily cap, a chip with
+// no alarm, and a balance line reading "Account balance … 3%" — a percentage
+// of nothing in particular. These tests pin the alarm that line became.
+
+/** Burn buckets spread over several keys, as `burnHourly` arrives keyed. */
+function unionBurn(nowMs, perDays) {
+  const now = new Date(nowMs);
+  const days = perDays.map((usd, i) => {
+    const day = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() - (perDays.length - i)));
+    return { ts: `${day.toISOString().slice(0, 10)}T12:00:00`, usd };
+  });
+  // Two keys sharing the same buckets: the pool is shared, so the union burn
+  // is what `balanceState` must read — a per-key read would halve the pace.
+  return { 'dh': days, 'assistant': days.map(d => ({ ...d, usd: 0 })) };
+}
+
+/** A balance with `left` dollars against `total` ever credited. */
+const credits = (left, total = 241) => ({ totalCredits: total, totalUsage: total - left });
+
+test('balanceState: runway at the median daily account burn sets the level', () => {
+  // The median branches exactly like the lifetime key metric: warn at ≤ 3
+  // days, critical at ≤ 1. Six dollars at $2/day is 3 — the warn boundary.
+  const warn = balanceState({ credits: credits(6), burn: unionBurn(NOW, [2, 2, 2, 2, 2]), nowMs: NOW });
+  assert.equal(warn.level, 'warn', `3 days of runway must warn — got ${warn.level}`);
+  assert.equal(warn.runwayDays, 3);
+  assert.equal(warn.balanceUsd, 6);
+
+  const critical = balanceState({ credits: credits(1.5), burn: unionBurn(NOW, [2, 2, 2]), nowMs: NOW });
+  assert.equal(critical.level, 'critical', `0.75 days of runway must be critical — got ${critical.level}`);
+
+  // Clear of the thresholds: no alarm, but the figures still ride along.
+  const none = balanceState({ credits: credits(20), burn: unionBurn(NOW, [2, 2, 2]), nowMs: NOW });
+  assert.equal(none.level, 'none');
+  assert.ok(Math.abs(none.percent - (221 / 241) * 100) < 0.01,
+    `the CONSUMED share of the credited total rides along — got ${none.percent}`);
+  assert.equal(none.lifetime, true, 'the balance never refills on a schedule, so it is a lifetime shape');
+});
+
+test('balanceState: the union burn counts unlimited keys, not just the tracked one', () => {
+  // The whole point of ADR-0007: a key with `limit: null` is invisible to every
+  // per-key metric and is exactly the key that can drain the pool. The burn
+  // must therefore be the UNION of the hourly windows, not any single key's.
+  const shared = unionBurn(NOW, [2, 2, 2, 2, 2]);
+  // The 'assistant' half of the union spends nothing; 'dh' spends $2/day. Both
+  // readings agree here, so the union itself is what must be exercised:
+  assert.equal(balanceState({ credits: credits(6), burn: shared, nowMs: NOW }).level, 'warn');
+  // A second key carrying real spend on top must DOUBLE the pace, not vanish:
+  const both = { ...shared, 'assistant': shared['dh'] };
+  const doubled = balanceState({ credits: credits(6), burn: both, nowMs: NOW });
+  assert.equal(doubled.runwayDays, 1.5,
+    `the union burn is $4/day here, so the runway halves — got ${JSON.stringify(doubled)}`);
+  // And an idle tracked key must not hide a busy one: the pool does not care
+  // which key spent it.
+  const idleTracked = balanceState({ credits: credits(6), burn: { 'dh': shared['dh'].map(d => ({ ...d, usd: 0 })), 'assistant': shared['dh'] }, nowMs: NOW });
+  assert.equal(idleTracked.level, 'warn', 'the union burn, not the tracked key burn, decides the level');
+});
+
+test('balanceState: fewer than 3 closed days or a zero median stays none', () => {
+  // The gate a new install sits behind: no median to divide by, no alarm —
+  // and never a division by zero. Silence here is correct, not a bug.
+  const fresh = balanceState({ credits: credits(6), burn: unionBurn(NOW, [2, 2]), nowMs: NOW });
+  assert.equal(fresh.level, 'none', 'two closed days have no median worth trusting');
+  const idle = balanceState({ credits: credits(6), burn: unionBurn(NOW, [0, 0, 0, 0, 0]), nowMs: NOW });
+  assert.equal(idle.level, 'none', 'a zero median yields no runway, not an alarm');
+  // Nothing at all: a summary without credits (the auxiliary read failed) is
+  // the same silence — "could not read" must never become "all spent".
+  assert.equal(balanceState({ burn: unionBurn(NOW, [2, 2, 2]), nowMs: NOW }).level, 'none');
+});
+
+test('balanceState: a balance at or past zero is critical outright', () => {
+  // No window read can soften a pool that is already gone: both the exact
+  // zero and the overdraft (a refund in flight, or rounding) must alarm.
+  for (const usage of [241, 250]) {
+    const state = balanceState({ credits: { totalCredits: 241, totalUsage: usage }, burn: unionBurn(NOW, [0, 0, 0]), nowMs: NOW });
+    assert.equal(state.level, 'critical', `usage ${usage} must be critical`);
+    assert.equal(state.balanceUsd, 0, 'the balance never renders negative — the pool is empty, not less than empty');
+  }
+});
+
+test('balanceState: the recent-pace escalation catches the ramp the median misses', () => {
+  // ADR-0007's deliberate addition over the lifetime key metric. The measured
+  // account's own shape: six quiet days and a ramp — a median of ~$0.2/day
+  // with $6 left would read "30 days, fine", while the last three closed days
+  // average $6.8/day: under a day of runway. The escalation must fire.
+  const ramp = unionBurn(NOW, [0.2, 0.2, 0.2, 0.2, 0.2, 0.2, 0.2, 2, 20]);
+  const caught = balanceState({ credits: credits(6), burn: ramp, nowMs: NOW });
+  assert.equal(caught.level, 'critical',
+    `the ramp must escalate to critical — got ${caught.level} (median ${(caught.perDayUsd ?? 0).toFixed(2)}/day)`);
+  // The median alone would have said none: the 3-day mean is the whole alarm.
+  const medianAlone = balanceState({ credits: credits(6), burn: unionBurn(NOW, [0.2, 0.2, 0.2, 0.2, 0.2, 0.2, 0.2]), nowMs: NOW });
+  assert.equal(medianAlone.level, 'none', 'the premise: the median alone stays quiet on this shape');
+
+  // The escalation only raises, never quiets: a quiet recent weekend must not
+  // talk a median-raised warn back down to none.
+  const quieted = balanceState({ credits: credits(9), burn: unionBurn(NOW, [3, 3, 3, 3, 3, 3, 0.1, 0.1, 0.1]), nowMs: NOW });
+  assert.equal(quieted.level, 'warn', 'a warn the median raised must survive a quiet weekend');
+});
+
+test('balanceState: hysteresis in whole days, like the lifetime key branch', () => {
+  // A median moves only when a UTC day boundary crosses a bucket, so the
+  // flicker risk is at the thresholds: 4 days leaves a warn only with the
+  // previous level aboard.
+  assert.equal(balanceState({ credits: credits(4), burn: unionBurn(NOW, [1, 1, 1, 1, 1]), nowMs: NOW }).level, 'none',
+    'four days of median runway is past the warn threshold');
+  assert.equal(balanceState({ credits: credits(4), burn: unionBurn(NOW, [1, 1, 1, 1, 1]), nowMs: NOW, previous: 'warn' }).level, 'warn',
+    'a previous warn holds until the leave-margin clears');
+});
+
+test('dotState: the dot carries the stricter of the key and the balance alarms', () => {
+  // The measured failure: a healthy key (31% of a daily cap) beside a pool
+  // with under a day left painted the dot blue. The balance can only raise,
+  // never lower, whatever the key's own level shows.
+  assert.equal(dotState('ok', 'none', 'critical'), 'limit-critical', 'a pool alarm holds the dot over a healthy key');
+  assert.equal(dotState('ok', 'warn', 'critical'), 'limit-critical', 'critical outranks warn');
+  assert.equal(dotState('stale', 'none', 'warn'), 'limit-warn', 'the balance outranks stale figures too');
+  assert.equal(dotState('ok', 'critical', 'none'), 'limit-critical', 'the key alarm still holds on its own');
+  assert.equal(dotState('ok', 'none', 'none'), 'ok', 'two healthy readings keep the data-health state');
+  assert.equal(dotState('ok', 'none'), 'ok', 'no balance argument reads as none — the old signature works');
+  // A broken reading outranks both alarms, unchanged.
+  assert.equal(dotState('error', 'none', 'critical'), 'error');
+  assert.equal(dotState('no-credential', 'critical', 'critical'), 'no-credential');
+});
+
+/** The measured account, shaped into a summary: a ramping pool and a quiet key. */
+function balanceAlarmPayload() {
+  return {
+    status: 'ok', refreshedAt: '2026-10-11T21:00:00.000Z', refreshSeconds: 60,
+    todaySpend: { usd: 3.06, requests: 61 }, last7: { usd: 37, requests: 700 },
+    last30: { usd: 120, requests: 2400 }, byDay: [], byModel: [],
+    byKey: [{
+      id: 'dh', todayUsd: 3.06, todayRequests: 61, todayModels: [],
+      last7: { usd: 37, requests: 700 }, last30: { usd: 120, requests: 2400 },
+    }],
+    // 10% consumed of a $20 daily cap: the key is quiet AND does not bind
+    // ($18 remaining beats the $6.58 pool), so the block belongs to the
+    // balance by RANK — the measured case where every per-key metric is
+    // green and the pool is the only thing about to stop work.
+    limits: { 'dh': { limit: 20, limitRemaining: 18, limitReset: 'daily', disabled: false } },
+    limitThresholds: { warn: 0.4, critical: 0.8 },
+    burnHourly: unionBurn(Date.UTC(2026, 9, 11, 12, 0, 0), [0.2, 0.2, 0.2, 0.2, 0.2, 2, 15, 17]),
+    credits: credits(6.58),
+  };
+}
+
+test('a critical balance takes the block, the dot and the sentence', async () => {
+  // The end-to-end rendering of ADR-0007: the key is quiet, the pool is not,
+  // and the popover says the pool — with money, days, and a denominator,
+  // not the old bare "3%".
+  const stand = loadWithFetch(balanceAlarmPayload(), Date.UTC(2026, 9, 11, 21, 0, 0), {
+    'ors.limitNotice': '1',
+    'ors.keyId': 'dh',
+  });
+  const tree = await openPanel(stand);
+  const text = textOf(tree).join(' | ');
+
+  const quota = findByClass(tree, 'ors-quota');
+  assert.ok(quota, 'the block must render');
+  assert.equal(quota.props['data-level'], 'critical', `the pool's level must take the block — got ${quota.props['data-level']}`);
+  assert.equal(quota.props.title, dicts.en.limitBalanceHint, 'the block must carry the pool tooltip');
+  assert.ok(text.includes('Account balance'), `the label must name the pool: ${text}`);
+  // The old line's failure was a percent of nothing: the new one states the
+  // money, the credited total it is part of, the time left, and the pool fact.
+  assert.ok(text.includes('$6.58 of $241.00 left'), `the sentence must carry the money: ${text}`);
+  assert.ok(text.includes('shared by all keys'), `the sentence must name the pool: ${text}`);
+  assert.ok(text.includes('under a day'), `the runway must be said: ${text}`);
+  const pct = textOf(findByClass(quota, 'ors-quota-pct')).join('');
+  assert.equal(pct, '97%', `the meter percent is the CONSUMED share of the credited total — got ${pct}`);
+
+  // The dot: the key is at 31% (none), the pool is critical — the dot must
+  // carry the pool, which is what stops work first.
+  const dot = findByClass(tree, 'ors-chip-dot');
+  assert.equal(dot.props['data-state'], 'limit-critical', `the dot must carry the stricter alarm — got ${dot.props['data-state']}`);
+  assert.equal(dot.props['aria-label'], dicts.en.limitLevelCritical, 'the label must name the level the colour carries');
+
+  // The key limit stays hidden in this shape: one number beats two, and the
+  // action ("top up") does not change with the second.
+  assert.ok(!text.includes('API key limit'), `the quiet key must not take the block: ${text}`);
+});
+
+test('with All keys selected, a critical balance outranks the tightest key limit', async () => {
+  // The rank path in the block picker: no key is tracked, so `keyLimit` is
+  // undefined and `balanceBinds` cannot fire. A tightest key limit EXISTS (so
+  // the old third alternative does not apply), and it is quiet — but the pool
+  // is critical, so the balance takes the block on rank, not on binding.
+  // Measured shape: every per-key metric green, the pool a day from empty.
+  const stand = loadWithFetch(balanceAlarmPayload(), Date.UTC(2026, 9, 11, 21, 0, 0), {
+    'ors.limitNotice': '1',
+  });
+  const tree = await openPanel(stand);
+  const text = textOf(tree).join(' | ');
+  assert.ok(text.includes('Account balance'), `the pool must take the block: ${text}`);
+  assert.ok(!text.includes('Tightest'), `a quiet tightest key must not win over a critical pool: ${text}`);
+  const quota = findByClass(tree, 'ors-quota');
+  assert.equal(quota.props['data-level'], 'critical', `the pool's level must show — got ${quota.props['data-level']}`);
+});
+
+test('the balance toast fires, names the pool, and retires as seen for ever', async () => {
+  const stand = loadWithFetch(balanceAlarmPayload(), Date.UTC(2026, 9, 11, 21, 0, 0), {
+    'ors.limitNotice': '1',
+    'ors.keyId': 'dh',
+  });
+  const toast = stand.mount('shell.overlay', {});
+  toast.render();
+  let tree = null;
+  for (let i = 0; i < 6; i += 1) { await flush(); if (toast.dirty) tree = toast.render(); }
+  const shown = expandComponent(tree);
+  assert.ok(findByClass(shown, 'ors-toast'), 'the pool escalation must render a toast');
+  assert.equal(tree.props.balance, true, 'the toast must be the balance kind');
+  const words = textOf(shown).join(' | ');
+  assert.ok(words.includes('Account balance'), `the toast must name the pool, not a key: ${words}`);
+  assert.ok(words.includes('Top up'), `the critical copy must name the action: ${words}`);
+  assert.ok(!words.includes('dh'), `a quiet key must not be blamed for the pool: ${words}`);
+
+  findByTag(shown, 'button').props.onClick(); // dismiss
+  for (let i = 0; i < 6; i += 1) { await flush(); if (toast.dirty) tree = toast.render(); }
+  assert.equal(expandComponent(tree), null, 'the toast must be gone once dismissed');
+  // The seen key: the id `balance`, the level, and the `ever` anchor — a real
+  // top-up is the only thing that re-arms it.
+  assert.deepEqual(
+    stand.writes.filter(entry => entry.key === 'ors.seenLimit').map(entry => entry.value),
+    ['balance:critical:ever'],
+    `the dismissal must record the pool in its own key — got ${JSON.stringify(stand.writes)}`,
+  );
+});
+
+test('the balance toast survives a tracked-key switch, unlike a key toast', async () => {
+  // The pool did not change with the tracked key, so neither must its
+  // escalation — while the key toast retires on the switch, as pinned above.
+  const stand = loadWithFetch(balanceAlarmPayload(), Date.UTC(2026, 9, 11, 21, 0, 0), {
+    'ors.limitNotice': '1',
+    'ors.keyId': 'dh',
+  });
+  const toast = stand.mount('shell.overlay', {});
+  toast.render();
+  let tree = null;
+  for (let i = 0; i < 6; i += 1) { await flush(); if (toast.dirty) tree = toast.render(); }
+  assert.ok(findByClass(expandComponent(tree), 'ors-toast'), 'the pool toast must fire first');
+
+  stand.setPref('ors.keyId', 'other-key');
+  for (let i = 0; i < 6; i += 1) { await flush(); if (toast.dirty) tree = toast.render(); }
+  assert.ok(findByClass(expandComponent(tree), 'ors-toast'), 'the pool toast must survive the key switch');
+  assert.ok(textOf(expandComponent(tree)).join(' ').includes('Account balance'), 'and still name the pool');
 });

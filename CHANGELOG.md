@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-10-12
+
+### Added
+
+- **Account balance warning**: the prepaid balance — the pool every key spends from, unlimited keys included — is now judged like the lifetime cap it is, instead of being shown as information only. Its level is the runway it buys at the median daily account burn over the trailing week: warn at three days or less, critical at one day or less, with an escalation on the mean of the last three closed days so a ramp is caught before the median notices it a week late. A critical balance holds the chip's dot over a key whose own limit is comfortably unspent, takes the popover's block with the money, the days and the denominator — `$6.58 of $241 left · under a day at this rate · shared by all keys` — instead of the old bare `3% · shared by all keys`, and fires a toast that names the pool and the action ("top up"). The block carries a tooltip saying what the pool is, and the meter now fills with the consumed share of the credited total, matching the key meters. The balance toast is retired as seen "for ever" — only a real top-up re-arms it — and survives a tracked-key switch. See [ADR 0007](https://github.com/RyabykinIlya/dsh-openrouter-spend/blob/main/docs/adr/0007-judge-the-account-balance-by-runway.md).
+
 ### Fixed
 
 - The chip's `session/day` pair now names **one API key on both halves**: this chat's spend on a key over that same key's day. It used to divide the chat's figure by the whole account's day, so the chip read `36.44/89.93 ₽` while the popover right beside it reported the tracked key's day, `36.53 ₽` — two different scopes presented as one ratio. The pair follows the key selected in the popover, or the session's own key when no key is selected and the session used exactly one. When no single key can be named — the session split could not be read, the lineage fold failed, the resolved key has no row, or one session spans several keys — the chip shows a single figure in the same scope instead of a pair. See [ADR 0006](https://github.com/RyabykinIlya/dsh-openrouter-spend/blob/main/docs/adr/0006-scope-the-chip-pair-to-one-api-key.md).
