@@ -42,7 +42,7 @@ function load() {
 }
 
 const api = load();
-const { limitState, limitSentence, pluralCategory, tPlural, withBurnNote, dotState, escalates, toastPeriodKey, periodStartKey, seenLimitKey, fmtDuration, nextResetMs, resetTextFor, median, peakHourlyBurn, windowedBurn, closedDayTotals } = api;
+const { limitState, limitSentence, chipPairFor, pluralCategory, tPlural, withBurnNote, dotState, escalates, toastPeriodKey, periodStartKey, seenLimitKey, fmtDuration, nextResetMs, resetTextFor, median, peakHourlyBurn, windowedBurn, closedDayTotals } = api;
 
 /** Burn buckets for `closedDayTotals`: `days` full UTC days ending before `nowMs`. */
 function burnFor(nowMs, perDay, days) {
@@ -61,9 +61,131 @@ const NOW = Date.UTC(2026, 9, 7, 12, 0, 0);
 test('the factory exposes the pure pieces alongside inject and apply', () => {
   assert.equal(typeof api.limitState, 'function');
   assert.equal(typeof api.dotState, 'function');
+  assert.equal(typeof api.chipPairFor, 'function');
   // The array is built inside the vm, so it shares no prototype with ours.
   assert.equal([...api.inject].join(','), 'slots,locale');
   assert.equal(typeof api.apply, 'function');
+});
+
+// --------------------------------------------------------------- chip pair
+// ADR-0006: the chip's `session/day` pair names one API key on both sides. The
+// bug it fixes was a pair whose left half was the session's key and right half
+// the whole account's day (`36.44/89.93` beside a popover head reading
+// `36.53`), so each case below is one way the halves could name two keys.
+
+/** A `byKey` row as the payload carries it. */
+const keyRow = (id, todayUsd, todayRequests = 1) => ({ id, todayUsd, todayRequests });
+
+test('chipPairFor: both halves come from the tracked key', () => {
+  const pair = chipPairFor({
+    sessionRow: { id: 'chat', todayUsd: 0.4292, todayKeys: [{ id: 'dh', usd: 0.4292, requests: 56 }] },
+    keyId: 'dh',
+    keys: [keyRow('dh', 0.4302), keyRow('other', 9)],
+  });
+
+  // The numerator is this chat's share of `dh`, the denominator is `dh`'s own
+  // day — never the account's day, which is what made the pair meaningless.
+  // Spread, not compared in place: the object was built inside the vm realm,
+  // and a strict deep-equal across realms fails on the prototype alone.
+  assert.deepEqual({ ...pair }, { keyId: 'dh', sessionUsd: 0.4292, dayUsd: 0.4302 });
+});
+
+test('chipPairFor: with no tracked key a single-key session scopes the pair to its key', () => {
+  const pair = chipPairFor({
+    sessionRow: { id: 'chat', todayKeys: [{ id: 'dh', usd: 1.5, requests: 3 }] },
+    keyId: '',
+    keys: [keyRow('dh', 4)],
+  });
+
+  assert.deepEqual({ ...pair }, { keyId: 'dh', sessionUsd: 1.5, dayUsd: 4 });
+});
+
+test('chipPairFor: a session spanning keys with no tracked key refuses the pair', () => {
+  // Picking the larger share would invent an attribution the data does not
+  // support: the chat's spend is on two keys, so no single-key day contains it.
+  const pair = chipPairFor({
+    sessionRow: {
+      id: 'chat',
+      todayKeys: [{ id: 'dh', usd: 1, requests: 2 }, { id: 'other', usd: 0.5, requests: 1 }],
+    },
+    keyId: '',
+    keys: [keyRow('dh', 4), keyRow('other', 8)],
+  });
+
+  assert.equal(pair, undefined);
+});
+
+test('chipPairFor: a tracked key this chat never used pairs 0.00 with that key\u2019s day', () => {
+  // Honest, not pretty: this chat spent nothing on the tracked key, so its
+  // share is zero. Filling in the other key's spend would name a key the chat
+  // did not use.
+  const pair = chipPairFor({
+    sessionRow: { id: 'chat', todayKeys: [{ id: 'other', usd: 2, requests: 4 }] },
+    keyId: 'dh',
+    keys: [keyRow('dh', 4), keyRow('other', 8)],
+  });
+
+  assert.deepEqual({ ...pair }, { keyId: 'dh', sessionUsd: 0, dayUsd: 4 });
+});
+
+test('chipPairFor: an absent session, absent split or unknown key refuses the pair', () => {
+  // Each is a distinct "cannot name one key" case, and all must fall back to a
+  // single figure rather than print a pair that mixes scopes.
+  assert.equal(chipPairFor({ sessionRow: undefined, keyId: 'dh', keys: [keyRow('dh', 4)] }), undefined);
+  // `todayKeys` absent means the host could not split the session: that is
+  // "could not read", which must not collapse into "spent nothing".
+  assert.equal(chipPairFor({ sessionRow: { id: 'chat' }, keyId: 'dh', keys: [keyRow('dh', 4)] }), undefined);
+  // A tracked key with no row in `byKey`: the denominator is unknown.
+  assert.equal(
+    chipPairFor({ sessionRow: { id: 'chat', todayKeys: [{ id: 'dh', usd: 1, requests: 1 }] }, keyId: 'ghost', keys: [keyRow('dh', 4)] }),
+    undefined,
+  );
+});
+
+test('chipPairFor: a zero or unusable denominator refuses the pair', () => {
+  // `0.00/0.00` is not a share of anything, and a non-numeric day figure is a
+  // payload fault rather than a spend of zero.
+  const row = { id: 'chat', todayKeys: [{ id: 'dh', usd: 0, requests: 0 }] };
+  assert.equal(chipPairFor({ sessionRow: row, keyId: 'dh', keys: [keyRow('dh', 0)] }), undefined);
+  assert.equal(chipPairFor({ sessionRow: row, keyId: 'dh', keys: [keyRow('dh', undefined)] }), undefined);
+  assert.equal(chipPairFor({ sessionRow: row, keyId: 'dh', keys: [keyRow('dh', 4)] })?.sessionUsd, 0);
+});
+
+test('chipPairFor: a numerator larger than its denominator refuses the pair', () => {
+  // The chat cannot have spent more of a key's day than that key spent. A
+  // payload saying otherwise was built from two different keys — exactly the
+  // bug this scoping exists to prevent — so it is refused rather than printed.
+  const pair = chipPairFor({
+    sessionRow: { id: 'chat', todayKeys: [{ id: 'dh', usd: 5, requests: 9 }] },
+    keyId: 'dh',
+    keys: [keyRow('dh', 4)],
+  });
+
+  assert.equal(pair, undefined);
+});
+
+test('chipPairFor: float drift on an exact share does not refuse the pair', () => {
+  // 0.1 + 0.2 lands a hair above 0.3 when summed, and a strict comparison
+  // would refuse a pair that is arithmetically correct.
+  const pair = chipPairFor({
+    sessionRow: { id: 'chat', todayKeys: [{ id: 'dh', usd: 0.30000000000000004, requests: 3 }] },
+    keyId: 'dh',
+    keys: [keyRow('dh', 0.3)],
+  });
+
+  assert.deepEqual({ ...pair }, { keyId: 'dh', sessionUsd: 0.30000000000000004, dayUsd: 0.3 });
+});
+
+test('chipPairFor: a malformed payload never throws', () => {
+  // The payload comes off the wire, so every shape is reachable.
+  assert.equal(chipPairFor(), undefined);
+  assert.equal(chipPairFor({}), undefined);
+  assert.equal(chipPairFor({ sessionRow: { todayKeys: 'nope' }, keyId: 'dh', keys: [keyRow('dh', 4)] }), undefined);
+  // Junk entries are skipped, not thrown on: with a tracked key and no entry
+  // naming it, the chat's share of that key is honestly zero.
+  const junk = chipPairFor({ sessionRow: { todayKeys: [null, 7] }, keyId: 'dh', keys: [keyRow('dh', 4)] });
+  assert.deepEqual({ ...junk }, { keyId: 'dh', sessionUsd: 0, dayUsd: 4 });
+  assert.equal(chipPairFor({ sessionRow: { todayKeys: [{ id: '', usd: 1 }] }, keyId: '', keys: [keyRow('', 4)] }), undefined);
 });
 
 test('a periodic key at 41% consumed warns and at 39% does not', () => {

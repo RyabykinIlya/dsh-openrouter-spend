@@ -52,8 +52,8 @@ const burnRow = (key, hour, usd) => ({
 /** The happy-path fixtures. Only `sess-b` is delegated, so the rollup folds it. */
 const dayRows = [{ date__day: DAY, api_key_id: 'build-bot', model: 'model-a', total_usage: '1.73', request_count: '8' }]
 const sessionRows = [
-  { session_id: 'sess-a', total_usage: '0.5', request_count: '4' },
-  { session_id: 'sess-b', total_usage: '0.25', request_count: '2' },
+  { session_id: 'sess-a', api_key_id: 'build-bot', total_usage: '0.5', request_count: '4' },
+  { session_id: 'sess-b', api_key_id: 'build-bot', total_usage: '0.25', request_count: '2' },
 ]
 const burnRows = [burnRow('build-bot', 10, 0.5), burnRow('build-bot', 11, 0.7)]
 const keyRows = [
@@ -103,7 +103,7 @@ function fanRecords(count, depth) {
   const rows = []
   for (let index = 0; index < count; index += 1) {
     const head = `s${index}`
-    rows.push({ session_id: head, total_usage: '1', request_count: '1' })
+    rows.push({ session_id: head, api_key_id: 'build-bot', total_usage: '1', request_count: '1' })
     records.push(...chainRecords(head, depth))
   }
   return { records, rows }
@@ -144,7 +144,7 @@ function routeHarness(options = {}) {
 
   globalThis.fetch = async (url, init = {}) => {
     const target = String(url)
-    const entry = { target, kind: 'other', auth: init.headers?.authorization ?? '' }
+    const entry = { target, kind: 'other', auth: init.headers?.authorization ?? '', body: init.body === undefined ? undefined : JSON.parse(init.body) }
     fetches.push(entry)
     if (target.startsWith('https://cbr.test')) { entry.kind = 'rate'; return script.rate() }
     if (target.includes('/credits')) { entry.kind = 'credits'; return script.credits() }
@@ -153,7 +153,10 @@ function routeHarness(options = {}) {
       const body = JSON.parse(init.body)
       if (body.granularity === 'hour') { entry.kind = 'burn'; return script.burn() }
       if (body.dimensions.includes('model')) { entry.kind = 'day'; return script.day() }
-      if (body.dimensions[0] === 'session_id') { entry.kind = 'sessions'; return script.sessions() }
+      // Matched on the presence of the dimension, not its position: the session
+      // query carries `api_key_id` as well (ADR-0006), and a positional check
+      // silently stopped recognising it.
+      if (body.dimensions.includes('session_id')) { entry.kind = 'sessions'; return script.sessions() }
     }
     throw new Error(`mock: unexpected ${init.method ?? 'GET'} ${target}`)
   }
@@ -222,6 +225,74 @@ const flush = async (turns = 8) => { for (let i = 0; i < turns; i += 1) await ne
 
 /** How many analytics reads actually reached the upstream: one per refresh. */
 const dayReads = harness => harness.fetches.filter(entry => entry.kind === 'day').length
+
+// ---------------------------------------------------------------------------
+// ADR-0006 — the session split names the API key that billed it
+// ---------------------------------------------------------------------------
+
+test('the session query asks for api_key_id, and the payload carries the split', async () => {
+  // The pair the chip renders divides this chat's spend by one key's day, so
+  // the host has to know which key billed the session. Dropping the dimension
+  // from the request left every downstream assertion green — the mock answers
+  // whatever is asked — so the ask itself is pinned here.
+  const harness = routeHarness()
+  try {
+    harness.apply()
+    await flush()
+    harness.advance(61_000)
+    const { payload } = await getSummary(harness)
+
+    const sessionReads = harness.fetches.filter(entry => entry.kind === 'sessions')
+    assert.ok(sessionReads.length > 0, 'the session split was asked for')
+    for (const read of sessionReads) {
+      assert.deepEqual(read.body.dimensions, ['api_key_id', 'session_id'],
+        'the session query must carry the key dimension, or the chip cannot name one key')
+    }
+
+    // The split survives the rollup: `sess-b` is delegated, so `sess-a` carries
+    // its own 0.5 plus the child's 0.25, and the per-key split with it.
+    const flat = payload.bySession.find(row => row.id === 'sess-a')
+    assert.deepEqual(flat.todayKeys, [{ id: 'build-bot', usd: 0.75, requests: 6 }])
+    assert.equal(flat.todayUsd, 0.75)
+    assert.deepEqual(payload.bySession.find(row => row.id === 'sess-b').todayKeys,
+      [{ id: 'build-bot', usd: 0.25, requests: 2 }])
+  } finally {
+    harness.restore()
+  }
+})
+
+test('a session id that only today reports still carries its key split', async () => {
+  // The window read and today's read are separate queries, and an id can be in
+  // one and not the other. The split has to be built from today's rows alone in
+  // that case, or the chip would lose the key for exactly the busiest sessions.
+  const harness = routeHarness({ sessionRows: [] })
+  // The window query answers empty and today's answers the row: the window read
+  // runs first, so the order is the one the host actually makes.
+  let sessionReads = 0
+  harness.script.sessions = () => {
+    sessionReads += 1
+    return sessionReads === 1
+      ? json(200, { data: { data: [], metadata: {} } })
+      : json(200, {
+        data: {
+          data: [{ session_id: 'today-only', api_key_id: 'build-bot', total_usage: '0.75', request_count: '3' }],
+          metadata: {},
+        },
+      })
+  }
+  try {
+    harness.apply()
+    await flush()
+    harness.advance(61_000)
+    const { payload } = await getSummary(harness)
+
+    const row = payload.bySession.find(entry => entry.id === 'today-only')
+    assert.equal(row.todayUsd, 0.75, 'the only figure known for that id is the one today reports')
+    assert.deepEqual(row.todayKeys, [{ id: 'build-bot', usd: 0.75, requests: 3 }])
+  } finally {
+    harness.restore()
+  }
+})
 
 // ---------------------------------------------------------------------------
 // M6 — auxiliary-failure containment in collect()
@@ -637,7 +708,7 @@ test('the rollup refuses a corpus that fans past MAX_ROLLUP_ROWS and keeps the u
 test('the ancestor walk stops at MAX_LINEAGE_DEPTH instead of trusting a corrupt chain', async () => {
   const depth = 200 // far past the cap, as a corrupt header chain would be
   const harness = routeHarness({
-    sessionRows: [{ session_id: 'c0', total_usage: '3', request_count: '30' }],
+    sessionRows: [{ session_id: 'c0', api_key_id: 'build-bot', total_usage: '3', request_count: '30' }],
     lineage: chainRecords('c0', depth),
   })
   try {

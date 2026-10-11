@@ -12,6 +12,7 @@ lives here, the UI detail lives in [the design doc](../design/limit-notice.md).
 | 0003 | Count a session's subagent descendants in the session spend figure | accepted | 2026-10-07 |
 | 0004 | Ship the limit warning behind a setting that defaults to off | accepted | 2026-10-07 |
 | 0005 | Surface a failed refresh and the schedule of the next attempt | accepted | 2026-10-09 |
+| 0006 | Scope the chip's session/day pair to one API key | accepted | 2026-10-11 |
 
 ## Conventions
 

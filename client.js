@@ -240,6 +240,57 @@ window.__ModuleLoader__.load({
         || sessionId === `session-${row.id}`);
     }
 
+    /**
+     * The one key the chip's `session/day` pair is scoped to, and the two
+     * figures on it (ADR-0006).
+     *
+     * The pair is `this chat / its key's day`. Both halves must name the same
+     * key: `36.44/36.53` says "this chat is most of what that key spent today",
+     * while `36.44/89.93` (this chat over the whole account's day) is a share of
+     * something the chat is not part of, and it contradicted the popover, whose
+     * head is the tracked key's day. So the key is resolved first, then both
+     * figures are read from it.
+     *
+     * Refusal over guesswork, in the order the ambiguity bites:
+     *  - no session row in the payload: nothing to pair.
+     *  - `todayKeys` absent: the host could not split this session by key, so
+     *    no key can be honestly named. The caller shows one figure instead.
+     *  - no tracked key and the session spans several keys: picking the largest
+     *    would invent an attribution the data does not support.
+     *  - the resolved key has no row in `byKey`: the denominator is unknown, and
+     *    a pair with a guessed denominator misreports cost.
+     *  - a zero denominator: the pair would read `0.00/0.00`, which is not a
+     *    share of anything.
+     *
+     * Pure and payload-fed so every branch is testable without a live host.
+     * @returns `{ keyId, sessionUsd, dayUsd }`, or `undefined` when no honest
+     * pair exists — the caller then falls back to a single scoped figure.
+     */
+    function chipPairFor({ sessionRow, keyId, keys } = {}) {
+      if (sessionRow === undefined || sessionRow === null) return undefined;
+      const shares = sessionRow.todayKeys;
+      // An absent split is "could not read", never "no key spent": those two
+      // must not collapse into the same zero (the containment rule the host's
+      // `limitsError` / `burnError` follow).
+      if (!Array.isArray(shares)) return undefined;
+      const tracked = typeof keyId === 'string' && keyId.length > 0 ? keyId : undefined;
+      const resolved = tracked ?? (shares.length === 1 ? shares[0]?.id : undefined);
+      if (typeof resolved !== 'string' || resolved.length === 0) return undefined;
+      const keyRow = (Array.isArray(keys) ? keys : []).find(entry => entry?.id === resolved);
+      if (keyRow === undefined) return undefined;
+      const dayUsd = Number(keyRow.todayUsd);
+      if (!Number.isFinite(dayUsd) || dayUsd <= 0) return undefined;
+      const share = shares.find(entry => entry?.id === resolved);
+      const sessionUsd = Number(share?.usd ?? 0);
+      if (!Number.isFinite(sessionUsd) || sessionUsd < 0) return undefined;
+      // The chat's share of a key cannot exceed that key's day. A payload that
+      // says otherwise was built from two different keys, which is the very bug
+      // this scoping exists to prevent, so the pair is refused rather than
+      // printed with a numerator that cannot belong to its denominator.
+      if (sessionUsd > dayUsd * (1 + 1e-9)) return undefined;
+      return { keyId: resolved, sessionUsd, dayUsd };
+    }
+
     const fmtInt = value => Number(value || 0).toLocaleString('en-US');
 
     /** A stable color per API key, so one key keeps its hue across reloads. */
@@ -1085,9 +1136,18 @@ window.__ModuleLoader__.load({
       // when the host read a session split — otherwise the chip stays a single
       // figure rather than showing an unverifiable zero.
       const sessionRow = findSession(data?.bySession, sessionId);
-      const chipPair = data?.bySession !== undefined && sessionRow !== undefined
-        ? money.fmtPair(sessionRow.todayUsd, data?.todaySpend?.usd ?? 0)
-        : undefined;
+      // A failed lineage read leaves the session figure holding only the
+      // session's own requests, not what it delegated (ADR-0003): the number
+      // understates. Pairing an understated numerator against a complete day
+      // would read as a share that is silently too small, so the pair is
+      // dropped and the single scoped figure stands instead.
+      const sessionSplitTrusted = data?.bySession !== undefined && data?.lineageError === undefined;
+      const pair = sessionSplitTrusted ? chipPairFor({ sessionRow, keyId, keys }) : undefined;
+      // Both figures of the pair name one key: this chat's spend on it over
+      // that same key's day (ADR-0006). Without a pair that holds together the
+      // chip keeps a single figure — the figure whose scope the popover head
+      // already shows — rather than dividing across two keys.
+      const chipPair = pair === undefined ? undefined : money.fmtPair(pair.sessionUsd, pair.dayUsd);
 
       // The limit block follows the key the user is tracking, because that is
       // the cap that stops them. With "All keys" there is no single cap, so the
@@ -1281,6 +1341,13 @@ window.__ModuleLoader__.load({
             h('div', { className: 'ors-quota-note' }, quota.note)),
           balance === undefined ? null : h('div', { className: 'ors-sub' },
             `${t('balance')}: ${money.fmt(balance)} · ${t('lifetime')}: ${money.fmt(data.credits.totalUsage)}`),
+          // A session read that failed must say so: the chip silently drops its
+          // pair, and without a sentence here that would look like a chat that
+          // spent nothing rather than one whose split could not be read.
+          data?.sessionsError === undefined ? null : h('div', { className: 'ors-note' },
+            t('sessionsUnavailable', { reason: data.sessionsError })),
+          data?.lineageError === undefined ? null : h('div', { className: 'ors-note' },
+            t('lineageUnavailable', { reason: data.lineageError })),
           keys.length > 0 && h('div', null,
             h('div', { className: 'ors-sub' }, t('byKey')),
             h('div', { className: 'ors-keyrow' },
@@ -1588,6 +1655,7 @@ window.__ModuleLoader__.load({
       // the same way; `client.js` cannot be an ES module, so this is the seam.
       limitState,
       limitSentence,
+      chipPairFor,
       pluralCategory,
       tPlural,
       withBurnNote,
@@ -1686,6 +1754,8 @@ window.__ModuleLoader__.load({
             limitTightest: 'Tightest of {count} limited keys',
             limitTightest_one: 'Tightest of {count} limited key',
             limitUnavailable: 'Key limits unavailable: {reason}',
+            sessionsUnavailable: 'Per-session spend unavailable, so the chip shows one figure: {reason}',
+            lineageUnavailable: 'Delegated subagent spend could not be read, so this chat\u2019s figure may be low: {reason}',
             limitBurnUnavailable: 'the pace of spend is unknown: {reason}',
             limitUnknownMatch: 'Limit unknown: this key\u2019s name did not match the account\u2019s key list.',
             limitLevelWarn: 'Limit is running low',
@@ -1766,6 +1836,8 @@ window.__ModuleLoader__.load({
             limitShared: '所有密钥共用',
             limitTightest: '{count} 个限额密钥中最紧的',
             limitUnavailable: '无法获取密钥限额：{reason}',
+            sessionsUnavailable: '无法获取按会话的支出，芯片只显示一个数值：{reason}',
+            lineageUnavailable: '无法读取委派子代理的支出，本对话的数值可能偏低：{reason}',
             limitBurnUnavailable: '无法确定消耗速度：{reason}',
             limitUnknownMatch: '限额未知：该密钥名称未匹配到账户密钥列表。',
             limitLevelWarn: '限额偏低',
@@ -1850,6 +1922,8 @@ window.__ModuleLoader__.load({
             limitTightest: 'Самый жёсткий из {count} ключей с лимитом',
             limitTightest_one: 'Самый жёсткий из {count} ключа с лимитом',
             limitUnavailable: 'Лимиты ключей недоступны: {reason}',
+            sessionsUnavailable: 'Расход по сессиям недоступен, чип показывает одну цифру: {reason}',
+            lineageUnavailable: 'Расход делегированных субагентов не прочитан, цифра этого чата может быть занижена: {reason}',
             limitBurnUnavailable: 'темп расхода неизвестен: {reason}',
             limitUnknownMatch: 'Лимит неизвестен: имя ключа не совпало со списком ключей аккаунта.',
             limitLevelWarn: 'Лимит подходит к концу',

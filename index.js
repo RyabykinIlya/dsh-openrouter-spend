@@ -49,7 +49,7 @@ const MAX_ANALYTICS_ROWS = 500
  */
 const MAX_BURN_ROWS = 5000
 
-/** The session split is one row per session, not per session and day; the server caps at 1000. */
+/** The session split is one row per session and key, not per session and day; the server caps at 1000. */
 const MAX_SESSION_ROWS = 1000
 
 /**
@@ -353,22 +353,35 @@ async function queryAnalytics(config, credential, start, end, signal) {
 /**
  * Read one session split row. Same wire narrowing as `readRow`; the `none`
  * bucket collects requests sent without a session id and belongs to no chat.
- * @returns the row, or `undefined` when it carries no usable session or cost.
+ *
+ * The API key rides along because the chip's `session/day` pair has to name one
+ * key on both sides (ADR-0006): a session's spend is only comparable to a key's
+ * day when we know which key the session spent on. A row without a usable key
+ * is dropped rather than kept with an unknown one — the pair cannot be scoped
+ * from it, and a row that cannot be attributed would either span keys or have
+ * to be guessed at, which is what this read exists to avoid.
+ * @returns the row, or `undefined` when it carries no usable session, key or cost.
  */
 function readSessionRow(row) {
   if (row === null || typeof row !== 'object') return undefined
   const id = row.session_id
+  const key = row.api_key_id
   const usd = Number(row.total_usage)
   const requests = Number(row.request_count)
   if (typeof id !== 'string' || id.length === 0 || id === 'none') return undefined
+  if (typeof key !== 'string' || key.length === 0) return undefined
   if (!Number.isFinite(usd) || !Number.isFinite(requests)) return undefined
-  return { id, usd, requests }
+  return { id, key, usd, requests }
 }
 
 /**
- * Fetch the spend split by session over a time range, without granularity: one
- * row per session for the whole range, so the row count is bounded by the
- * number of sessions rather than sessions multiplied by days.
+ * Fetch the spend split by session and API key over a time range, without
+ * granularity: one row per session and key for the whole range, so the row
+ * count is bounded by sessions × the keys each one used rather than
+ * sessions multiplied by days. The key dimension is what lets the browser
+ * scope the chip's two figures to a single key (ADR-0006); measured against a
+ * live account, the same 271 sessions came back as 275 rows, because a session
+ * bills to one key unless the tracked key was switched mid-session.
  */
 async function querySessions(config, credential, start, end, signal) {
   const url = `${config.apiBase.replace(/\/+$/, '')}/analytics/query`
@@ -377,7 +390,7 @@ async function querySessions(config, credential, start, end, signal) {
     headers: { authorization: `Bearer ${credential}`, 'content-type': 'application/json' },
     body: JSON.stringify({
       metrics: ['total_usage', 'request_count'],
-      dimensions: ['session_id'],
+      dimensions: ['api_key_id', 'session_id'],
       time_range: { start, end },
       limit: MAX_SESSION_ROWS,
     }),
@@ -402,19 +415,106 @@ async function querySessions(config, credential, start, end, signal) {
 }
 
 /**
+ * One key's share of a session's spend, accumulated across the rows that share
+ * the session's id. A session bills to one key unless the tracked key was
+ * switched mid-session, so this is usually a single entry — but the pair the
+ * chip renders divides two figures, and both have to name the same key, so the
+ * split is kept rather than collapsed to a guessed-at winner.
+ * @returns `key → { usd, requests }`, insertion-ordered.
+ */
+function newKeyTotals() {
+  return new Map()
+}
+
+/**
+ * Add one row's figures to a session entry, keyed by the API key that billed
+ * them. A row with no usable key is skipped rather than filed under
+ * `undefined`: an unattributable share is not attributed to anyone, and an
+ * `undefined` entry would reach the payload as a key the browser cannot match
+ * against `byKey`.
+ */
+function addKeyTotal(totals, key, usd, requests) {
+  if (typeof key !== 'string' || key.length === 0) return
+  const entry = totals.get(key) ?? { usd: 0, requests: 0 }
+  entry.usd += usd
+  entry.requests += requests
+  totals.set(key, entry)
+}
+
+/**
+ * Read a row's per-key totals whatever shape they arrive in: `mergeSessions`
+ * builds a `Map`, and a payload or a test may hand back the array form. An
+ * absent field reads as "no per-key information", which publishes an empty
+ * split — the browser then declines the pair rather than dividing by a key it
+ * cannot name.
+ */
+function keyTotalsOf(row) {
+  const source = row?.todayKeys
+  const totals = newKeyTotals()
+  if (source instanceof Map) {
+    for (const [key, entry] of source) addKeyTotal(totals, key, entry?.usd ?? 0, entry?.requests ?? 0)
+    return totals
+  }
+  if (Array.isArray(source)) {
+    for (const entry of source) {
+      // `id` is checked inside `addKeyTotal`, so the array form cannot smuggle
+      // in a bucket the Map form would have refused.
+      addKeyTotal(totals, entry?.id, entry?.usd ?? 0, entry?.requests ?? 0)
+    }
+  }
+  return totals
+}
+
+/** The wire shape of a session row's per-key split: descending by spend, so the largest share leads. */
+function keyTotalsPayload(totals) {
+  return [...totals.entries()]
+    .map(([id, entry]) => ({ id, usd: entry.usd, requests: entry.requests }))
+    .sort((left, right) => right.usd - left.usd)
+}
+
+/**
  * Merge the window's session rows with today's: window totals carry the
- * popover list, today's figures carry the chip's session half.
+ * popover list, today's figures carry the chip's session half. Both are kept
+ * per API key, because the chip's pair is only meaningful when its two figures
+ * name one key (ADR-0006).
  * @returns the per-session split, most recent spend first.
  */
 export function mergeSessions(windowRows, todayRows) {
   const merged = new Map()
-  for (const row of windowRows) merged.set(row.id, { ...row, todayUsd: 0, todayRequests: 0 })
+  const create = () => ({ id: '', usd: 0, requests: 0, todayUsd: 0, todayRequests: 0, todayKeys: newKeyTotals() })
+  for (const row of windowRows) {
+    const entry = merged.get(row.id) ?? create()
+    entry.id = row.id
+    entry.usd += row.usd
+    entry.requests += row.requests
+    merged.set(row.id, entry)
+  }
+  // A session that only today's read mentions still has to carry a window
+  // figure, or the popover would show it with a zero: the window query covers
+  // today too, so an id here and not there means the window read was thinner,
+  // and today's own figures are the honest window total. Mirrored by id, not
+  // per row, so a row already in the window is never counted twice.
+  const mirrored = new Set()
   for (const row of todayRows) {
-    const entry = merged.get(row.id)
-    if (entry === undefined) merged.set(row.id, { ...row, todayUsd: row.usd, todayRequests: row.requests })
-    else { entry.todayUsd = row.usd; entry.todayRequests = row.requests }
+    const entry = merged.get(row.id) ?? create()
+    entry.id = row.id
+    entry.todayUsd += row.usd
+    entry.todayRequests += row.requests
+    if (!merged.has(row.id)) mirrored.add(row.id)
+    if (mirrored.has(row.id)) {
+      entry.usd += row.usd
+      entry.requests += row.requests
+    }
+    // `todayKeys` is built here and nowhere else, so it is always a Map at this
+    // point; `keyTotalsOf` reads it as whatever shape a caller hands the rollup.
+    addKeyTotal(entry.todayKeys, row.key, row.usd, row.requests)
+    merged.set(row.id, entry)
   }
   return [...merged.values()]
+    // The wire shape, not the Map the loop accumulated into: one payload shape
+    // for merged and rolled-up rows alike, so no caller has to know which path
+    // produced the rows it is reading.
+    .map(entry => ({ ...entry, todayKeys: keyTotalsPayload(entry.todayKeys) }))
     .sort((left, right) => (right.todayUsd - left.todayUsd) || (right.usd - left.usd))
 }
 
@@ -473,7 +573,9 @@ async function queryLineage(ctx, signal) {
  *
  * The response keeps the shape the browser half already reads: `usd`,
  * `requests`, `todayUsd`, `todayRequests`, now meaning "this session plus the
- * work it delegated" rather than the session's own requests alone.
+ * work it delegated" rather than the session's own requests alone — plus
+ * `todayKeys`, the same subtree figures split by the API key that billed them,
+ * which is what lets the chip name one key on both halves of its pair (ADR-0006).
  * @param rows - the merged per-session split, before the rollup.
  * @param lineage - `childrenByParent`, delegation edges only (see `delegationEdges`).
  * @returns the rolled-up split, most recent spend first.
@@ -485,11 +587,15 @@ export function rollupSessions(rows, lineage) {
   }
   const subtree = new Map()
   const bump = (id, row) => {
-    const entry = subtree.get(id) ?? { usd: 0, requests: 0, todayUsd: 0, todayRequests: 0 }
+    const entry = subtree.get(id) ?? { usd: 0, requests: 0, todayUsd: 0, todayRequests: 0, todayKeys: newKeyTotals() }
     entry.usd += row.usd
     entry.requests += row.requests
     entry.todayUsd += row.todayUsd
     entry.todayRequests += row.todayRequests
+    // The key split folds with the money it splits: a child billed on another
+    // key than its parent makes the subtree span two keys, and the browser
+    // needs to see that rather than a pair that names only one of them.
+    for (const [key, share] of keyTotalsOf(row)) addKeyTotal(entry.todayKeys, key, share.usd, share.requests)
     subtree.set(id, entry)
   }
   for (const row of rows) {
@@ -513,8 +619,8 @@ export function rollupSessions(rows, lineage) {
   }
   return [...subtree.keys()]
     .map(id => {
-      const { usd, requests, todayUsd, todayRequests } = subtree.get(id)
-      return { id, usd, requests, todayUsd, todayRequests }
+      const { usd, requests, todayUsd, todayRequests, todayKeys } = subtree.get(id)
+      return { id, usd, requests, todayUsd, todayRequests, todayKeys: keyTotalsPayload(todayKeys) }
     })
     .sort((left, right) => (right.todayUsd - left.todayUsd) || (right.usd - left.usd))
 }
@@ -529,6 +635,24 @@ export function rollupSessions(rows, lineage) {
  * @param onError - reports a failed read, typically to the host log.
  * @returns the summary fragment the payload carries.
  */
+/**
+ * The wire shape of merged (unrolled) session rows. `mergeSessions` keeps its
+ * per-key split in a `Map`, and a `Map` serialises to `{}` — so a payload that
+ * skipped this step would publish the split as an empty object and the chip
+ * would silently lose the key it needs. Used on every path that returns rows
+ * without going through `rollupSessions`.
+ */
+function sessionRowsPayload(rows) {
+  return rows.map(row => ({
+    id: row.id,
+    usd: row.usd,
+    requests: row.requests,
+    todayUsd: row.todayUsd,
+    todayRequests: row.todayRequests,
+    todayKeys: keyTotalsPayload(keyTotalsOf(row)),
+  }))
+}
+
 export async function rollupWithLineage(merged, readLineage, onError) {
   try {
     const childrenByParent = await readLineage()
@@ -541,7 +665,7 @@ export async function rollupWithLineage(merged, readLineage, onError) {
       onError(error)
     } catch { /* reporting is best-effort */ }
     return {
-      bySession: merged,
+      bySession: sessionRowsPayload(merged),
       lineageError: error instanceof Error ? error.message : String(error),
     }
   }

@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- The chip's `session/day` pair now names **one API key on both halves**: this chat's spend on a key over that same key's day. It used to divide the chat's figure by the whole account's day, so the chip read `36.44/89.93 ₽` while the popover right beside it reported the tracked key's day, `36.53 ₽` — two different scopes presented as one ratio. The pair follows the key selected in the popover, or the session's own key when no key is selected and the session used exactly one. When no single key can be named — the session split could not be read, the lineage fold failed, the resolved key has no row, or one session spans several keys — the chip shows a single figure in the same scope instead of a pair. See [ADR 0006](https://github.com/RyabykinIlya/dsh-openrouter-spend/blob/main/docs/adr/0006-scope-the-chip-pair-to-one-api-key.md).
+- A chat whose spend is billed entirely to a delegated subagent no longer reads `0.00` in the chip's session half. Such a session has no own row for today, so the merge gave it a zero day total; today's own figures now fill the window total for an id the window read did not mention.
+- A failed session split (`sessionsError`) and a failed lineage fold (`lineageError`) are now named in the popover instead of silently costing the chip its pair. Both mean "could not read", which must never look like "spent nothing".
+- The README claimed the chip's pair followed the selected range; it is, and has always been, a today figure. Corrected in all three languages.
+
+### Changed
+
+- The session split query carries the `api_key_id` dimension, so the host can attribute each session's spend to the key that billed it. The split travels in the payload as each row's `todayKeys`.
+
 ## [0.4.1] - 2026-10-09
 
 ### Added

@@ -305,7 +305,7 @@ const CLOCK = Date.UTC(2026, 9, 9, 12, 0, 0);
  * coalescing window would legitimately reuse the first reply, so a test that
  * wants a second read has to step `advance` past it first.
  */
-function renderHarness(payload, fetchImpl) {
+function renderHarness(payload, fetchImpl, storage = {}) {
   let captured;
   const timers = [];
   const fetches = [];
@@ -321,7 +321,7 @@ function renderHarness(payload, fetchImpl) {
   runInNewContext(source, {
     window: {
       __ModuleLoader__: { load: registration => { captured = registration; } },
-      localStorage: { getItem: () => null, setItem: () => {} },
+      localStorage: { getItem: key => (key in storage ? storage[key] : null), setItem: () => {} },
       addEventListener: () => {},
       removeEventListener: () => {},
       dispatchEvent: () => {},
@@ -492,6 +492,103 @@ test('a stale reply shows the reason, the countdown, and a Retry that forces a r
 function okPayload() {
   return { ...stalePayload(), status: 'ok', error: undefined, errorCode: undefined };
 }
+
+/**
+ * A payload carrying the session split the chip's pair needs: one chat, billed
+ * on `dh`, against that key's day. `todaySpend` is deliberately much larger
+ * than `dh`'s day, because the bug being pinned is the chip dividing the chat
+ * by the whole account's day.
+ */
+function pairPayload(overrides = {}) {
+  return {
+    ...okPayload(),
+    todaySpend: { usd: 1.0592, requests: 100 },
+    byKey: [
+      { id: 'dh', usd: 4, requests: 90, todayUsd: 0.4302, todayRequests: 74, todayModels: [], last7: { usd: 4, requests: 90 }, last30: { usd: 4, requests: 90 } },
+      { id: 'other', usd: 90, requests: 900, todayUsd: 0.629, todayRequests: 26, todayModels: [], last7: { usd: 90, requests: 900 }, last30: { usd: 90, requests: 900 } },
+    ],
+    bySession: [{
+      id: 'session',
+      usd: 3.5, requests: 48,
+      todayUsd: 0.4292, todayRequests: 56,
+      todayKeys: [{ id: 'dh', usd: 0.4292, requests: 56 }],
+    }],
+    ...overrides,
+  };
+}
+
+test('the chip pairs the chat with its own key\u2019s day, never the account\u2019s', async () => {
+  // ADR-0006, the reported bug: the chip read `36.44/89.93` — this chat over
+  // the whole account's day — while the popover head read the tracked key's
+  // day, `36.53`. The two halves named different keys, so the pair was not a
+  // share of anything. Scoped to the session's key, it is `$0.43/$0.43`.
+  const harness = renderHarness(pairPayload());
+  harness.render();
+  harness.tick();
+  await flush();
+
+  const text = textOf(harness.render()).join(' | ');
+  assert.match(text, /\$0\.43\/\$0\.43/, `the chat pairs with dh\u2019s day: ${text}`);
+  assert.ok(!text.includes('$1.06'), 'the account-wide day must not be the denominator');
+});
+
+test('the chip follows the tracked key, including a key this chat never used', async () => {
+  // The tracked key decides the scope, because the popover beside the chip is
+  // scoped to it: a pair that ignored the filter would disagree with the panel
+  // it belongs to. A chat that spent nothing on that key reads an honest zero.
+  const tracked = renderHarness(pairPayload(), undefined, { 'ors.keyId': 'other' });
+  tracked.render();
+  tracked.tick();
+  await flush();
+  assert.match(textOf(tracked.render()).join(' | '), /\$0\.00\/\$0\.63/);
+
+  const unused = renderHarness(pairPayload(), undefined, { 'ors.keyId': 'ghost' });
+  unused.render();
+  unused.tick();
+  await flush();
+  // `ghost` has no `byKey` row, so the denominator is unknown: one figure,
+  // never a pair over a key the payload does not describe.
+  const text = textOf(unused.render()).join(' | ');
+  assert.ok(!text.includes('/$'), `no pair without a known day figure: ${text}`);
+});
+
+test('a failed lineage read drops the pair and says why', async () => {
+  // The session figure excludes delegated spend when the fold could not run, so
+  // pairing it against a complete day would understate the chat's share. The
+  // chip falls back to one figure and the panel names the reason, because a
+  // silent drop would look like a chat that spent nothing.
+  const harness = renderHarness(pairPayload({ lineageError: 'session corpus unreadable' }));
+  harness.render();
+  harness.tick();
+  await flush();
+
+  const chip = harness.render();
+  const text = textOf(chip).join(' | ');
+  assert.ok(!text.includes('/$'), `no pair on an unrolled split: ${text}`);
+
+  findByClass(chip, 'ors-chip').props.onClick();
+  const panel = textOf(harness.render()).join(' | ');
+  assert.match(panel, /Delegated subagent spend could not be read/);
+  assert.match(panel, /session corpus unreadable/, 'the reason rides the sentence');
+});
+
+test('a failed session read keeps the figures and says the chip has one figure', async () => {
+  // `bySession` is absent entirely, so there is no row to pair at all. The
+  // panel has to say so rather than leave the reader to guess why the chip
+  // stopped showing a pair.
+  const harness = renderHarness(pairPayload({ bySession: undefined, sessionsError: 'analytics/query (sessions) answered 500' }));
+  harness.render();
+  harness.tick();
+  await flush();
+
+  const chip = harness.render();
+  assert.ok(!textOf(chip).join(' | ').includes('/$'), 'no pair without a session split');
+
+  findByClass(chip, 'ors-chip').props.onClick();
+  const panel = textOf(harness.render()).join(' | ');
+  assert.match(panel, /Per-session spend unavailable/);
+  assert.match(panel, /analytics\/query \(sessions\) answered 500/);
+});
 
 test('a failed refresh turns the dot amber while the good figures stay on screen', async () => {
   // M3 / ADR-0005: amber is "the last good figures are still on screen, but

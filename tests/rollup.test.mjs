@@ -15,11 +15,20 @@ import assert from 'node:assert/strict'
 
 import { delegationEdges, mergeSessions, rollupSessions, rollupWithLineage } from '../index.js'
 
-/** One window/today row as OpenRouter reports it, before the merge. */
-const source = (id, usd, requests) => ({ id, usd, requests })
+/**
+ * One window/today row as OpenRouter reports it, before the merge. `key` is the
+ * `api_key_id` dimension the session query carries so the chip's pair can name
+ * one key on both sides (ADR-0006).
+ */
+const source = (id, usd, requests, key = 'key-a') => ({ id, key, usd, requests })
 
-/** One merged row, the shape `rollupSessions` reads and returns. */
-const row = (id, usd, requests, todayUsd, todayRequests) => ({ id, usd, requests, todayUsd, todayRequests })
+/** One rolled-up row: the shape `rollupSessions` returns, `todayKeys` as the wire array. */
+const row = (id, usd, requests, todayUsd, todayRequests, todayKeys = []) => ({
+  id, usd, requests, todayUsd, todayRequests, todayKeys,
+})
+
+/** One key's share of a session's day, as the payload carries it. */
+const share = (id, usd, requests) => ({ id, usd, requests })
 
 /** The lineage index `queryLineage` hands to the rollup: parent id → child ids. */
 const lineage = pairs => ({
@@ -27,12 +36,19 @@ const lineage = pairs => ({
 })
 
 /** Folding sums money, so 0.2 + 0.5 lands a bit off; compare to a micro-dollar. */
-const money = rows => rows.map(({ id, usd, requests, todayUsd, todayRequests }) => ({
+const money = rows => rows.map(({ id, usd, requests, todayUsd, todayRequests, todayKeys }) => ({
   id,
   usd: Math.round(usd * 1e6) / 1e6,
   requests,
   todayUsd: Math.round(todayUsd * 1e6) / 1e6,
   todayRequests,
+  // The per-key split travels with the figures it splits, so it is compared
+  // too: a fold that drops or reorders a share would otherwise go unnoticed.
+  todayKeys: (todayKeys ?? []).map(entry => ({
+    id: entry.id,
+    usd: Math.round(entry.usd * 1e6) / 1e6,
+    requests: entry.requests,
+  })),
 }))
 
 const ids = rows => rows.map(entry => entry.id)
@@ -153,12 +169,107 @@ test('mergeSessions: today-only rows appear and a shared row takes today figures
   const todayRows = [source('w1', 1, 10), source('t3', 3, 30)]
 
   assert.deepEqual(mergeSessions(windowRows, todayRows), [
-    row('t3', 3, 30, 3, 30),
-    row('w1', 5, 50, 1, 10),
-    row('w2', 2, 20, 0, 0),
+    row('t3', 3, 30, 3, 30, [share('key-a', 3, 30)]),
+    row('w1', 5, 50, 1, 10, [share('key-a', 1, 10)]),
+    row('w2', 2, 20, 0, 0, []),
   ])
   // the caller's rows are left alone
   assert.deepEqual(windowRows, [source('w1', 5, 50), source('w2', 2, 20)])
+})
+
+test('mergeSessions: a session billed on two keys keeps both shares, largest first', () => {
+  // The pair the chip renders divides two figures, and both must name one key
+  // (ADR-0006). A session that spans keys therefore has to keep the split: the
+  // browser can see that no single key explains it and decline the pair, which
+  // is honest, where a collapsed winner would print a numerator that does not
+  // belong to its denominator.
+  const merged = mergeSessions(
+    [source('chat', 9, 90, 'key-a'), source('chat', 1, 10, 'key-b')],
+    [source('chat', 3, 30, 'key-a'), source('chat', 6, 60, 'key-b')],
+  )
+
+  assert.deepEqual(merged, [
+    row('chat', 10, 100, 9, 90, [share('key-b', 6, 60), share('key-a', 3, 30)]),
+  ])
+})
+
+test('mergeSessions: rows are summed, so one id read twice does not lose spend', () => {
+  // The window and today reads are separate, but one id can legitimately appear
+  // once per key in each. Summing is what keeps a split session's window total
+  // whole; assigning would keep only the last key read.
+  const merged = mergeSessions(
+    [source('chat', 1, 10, 'key-a'), source('chat', 2, 20, 'key-b')],
+    [],
+  )
+
+  assert.deepEqual(merged, [row('chat', 3, 30, 0, 0, [])])
+})
+
+test('mergeSessions: a row with no key adds no unattributable share', () => {
+  // An `undefined` bucket would reach the payload as a key the browser cannot
+  // match against `byKey`, and would make the split look like a real one.
+  const merged = mergeSessions([], [{ id: 'chat', usd: 4, requests: 40 }])
+
+  assert.deepEqual(merged, [row('chat', 4, 40, 4, 40, [])])
+})
+
+test('rollupSessions: the per-key split folds with the money it splits', () => {
+  // A child billed on a different key than its parent makes the subtree span
+  // two keys, and the parent's row has to say so — otherwise the chip would
+  // scope the pair to whichever key the parent itself used and print a day
+  // figure that silently excluded the child's spend.
+  const rolled = rollupSessions(
+    [
+      row('parent', 1, 10, 0.2, 2, [share('key-a', 0.2, 2)]),
+      row('child', 3, 30, 0.5, 5, [share('key-b', 0.5, 5)]),
+    ],
+    lineage([['parent', ['child']]]),
+  )
+
+  assert.deepEqual(money(rolled), [
+    row('parent', 4, 40, 0.7, 7, [share('key-b', 0.5, 5), share('key-a', 0.2, 2)]),
+    row('child', 3, 30, 0.5, 5, [share('key-b', 0.5, 5)]),
+  ])
+})
+
+test('rollupSessions: shares on one key merge instead of listing the key twice', () => {
+  const rolled = rollupSessions(
+    [
+      row('parent', 1, 10, 0.2, 2, [share('key-a', 0.2, 2)]),
+      row('child', 3, 30, 0.5, 5, [share('key-a', 0.5, 5)]),
+    ],
+    lineage([['parent', ['child']]]),
+  )
+
+  assert.deepEqual(money(rolled), [
+    row('parent', 4, 40, 0.7, 7, [share('key-a', 0.7, 7)]),
+    row('child', 3, 30, 0.5, 5, [share('key-a', 0.5, 5)]),
+  ])
+})
+
+test('rollupSessions: todayUsd always equals the sum of its own per-key shares', () => {
+  // The invariant the chip's denominator rests on: the day figure and the
+  // split of it come from the same fold, so a share can never exceed the total
+  // it is part of. Pinned over the whole subtree, grandparents included.
+  const rolled = rollupSessions(
+    [
+      row('root', 1, 10, 0.1, 1, [share('key-a', 0.1, 1)]),
+      row('mid', 2, 20, 0.2, 2, [share('key-a', 0.2, 2)]),
+      // key-b outweighs key-a, so the ordering assertion below is decided by
+      // spend rather than by which key happened to be inserted first.
+      row('leaf', 3, 30, 0.4, 4, [share('key-b', 0.4, 4)]),
+    ],
+    lineage([['root', ['mid']], ['mid', ['leaf']]]),
+  )
+
+  const root = rolled.find(entry => entry.id === 'root')
+  // Rounded, not compared raw: money is summed, so 0.1 + 0.2 + 0.4 lands on
+  // 0.7000000000000001 and a strict equality would fail on arithmetic rather
+  // than on the invariant.
+  const round = value => Math.round(value * 1e6) / 1e6
+  assert.equal(round(root.todayUsd), 0.7)
+  assert.equal(round(root.todayKeys.reduce((sum, entry) => sum + entry.usd, 0)), round(root.todayUsd))
+  assert.deepEqual(root.todayKeys.map(entry => entry.id), ['key-b', 'key-a'])
 })
 
 test('rollupSessions: ids match exactly, so a prefixed id never absorbs a bare one', () => {
