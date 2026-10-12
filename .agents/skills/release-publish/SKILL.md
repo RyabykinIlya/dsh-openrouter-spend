@@ -1,6 +1,6 @@
 ---
 name: release-publish
-description: Release dsh-openrouter-spend — bump version, README/CHANGELOG, tests, tag, push to GitHub and publish to npm from the .env token. Use when preparing or shipping a release of this plugin.
+description: Release dsh-openrouter-spend — bump version, README/CHANGELOG, tests, tag, GitHub Release, npm publish from the .env token. Use when preparing or shipping a release of this plugin.
 ---
 
 # Release & publish
@@ -47,7 +47,40 @@ rejected with "Translation files out of sync", run
    git push origin main --tags
    ```
 
-2. Publish with the `.env` token. **Never** `npm login`, never write the
+2. Create the **GitHub Release** on that tag — a tag alone is not a release,
+   and the Releases page is where users look (the repo had tags without
+   releases until 2026-10-12, and `gh release list` still showed the previous
+   version as "Latest"). `gh` is authenticated on this machine as
+   `RyabykinIlya` (keyring), so no token handling is needed here:
+   ```sh
+   cd /Users/user/dev/dsh-openrouter-spend
+   cat > /tmp/release-X.Y.Z.md <<'EOF'
+   ## Что нового
+
+   - <what a user sees>
+
+   ## Что исправлено
+
+   - <what a user sees>
+
+   ## Установка
+
+   `dsh plugin --profile web add dsh-openrouter-spend@X.Y.Z`
+   EOF
+   gh release create vX.Y.Z \
+     --title "X.Y.Z: <short user-facing headline>" \
+     --notes-file /tmp/release-X.Y.Z.md --latest
+   ```
+   The install line sits in single backticks, not a fenced block: this whole
+   recipe is itself inside a ```sh fence, and a nested triple fence would end
+   the skill's block early and scramble everything after it.
+   House style, taken from the shipped releases: **Russian**, sections
+   `## Что нового` / `## Что исправлено` / `## Установка`, bullets written as
+   what a user sees (not what the diff did), and a link to the ADR when the
+   release ships a decision. The notes restate the CHANGELOG section — do not
+   paste the whole changelog, one release's worth only.
+
+3. Publish to npm with the `.env` token. **Never** `npm login`, never write the
    token into a file npm persists (`~/.npmrc`) — pass it as a one-shot config
    on the command line, read from `.env` at run time:
    ```sh
@@ -61,7 +94,7 @@ rejected with "Translation files out of sync", run
    Run it from outside the repo dir so the repo's own `.env`/`.npmrc` cannot
    leak into the environment npm sees.
 
-3. Sanity-check the token first if anything smells wrong:
+4. Sanity-check the token first if anything smells wrong:
    ```sh
    curl -s -H "Authorization: Bearer $PNPM_TOKEN" https://registry.npmjs.org/-/whoami
    ```
@@ -70,7 +103,7 @@ rejected with "Translation files out of sync", run
    answers `404 'dsh-openrouter-spend@…' is not in this registry` is the same
    auth problem, not a missing package.
 
-4. Verify propagation — the registry takes a minute or two, poll until 200:
+5. Verify propagation — the registry takes a minute or two, poll until 200:
    ```sh
    curl -s -o /dev/null -w "%{http_code}\n" \
      https://registry.npmjs.org/dsh-openrouter-spend/X.Y.Z
@@ -80,6 +113,10 @@ rejected with "Translation files out of sync", run
 
 ## Known traps (each has cost real time)
 
+- **A pushed tag is not a GitHub Release.** `git push --tags` leaves the
+  Releases page empty and keeps the previous version marked "Latest"; nothing
+  fails, so nothing reminds you. `gh release list` is the check, and the
+  `gh release create` step above is what fixes it.
 - `404 Not Found - PUT …/dsh-openrouter-spend` on publish = auth, not "the
   package does not exist". Check the token with whoami before re-trying.
 - `limit: Too big: expected number to be <=10000` from
@@ -92,6 +129,16 @@ rejected with "Translation files out of sync", run
 
 ## Done means
 
-Tag pushed (`git ls-remote --tags origin` shows it), npm registry answers
-200 for the exact version, and the release notes say what a user sees — not
-what the diff did.
+Four things, all checkable:
+
+```sh
+# the tag is pushed
+git ls-remote --tags origin | grep vX.Y.Z
+# it is the latest GitHub RELEASE, not just a tag
+gh release list --limit 1
+# npm answers 200 for the exact version
+curl -s -o /dev/null -w "%{http_code}\n" \
+  https://registry.npmjs.org/dsh-openrouter-spend/X.Y.Z
+```
+
+and the release notes say what a user sees — not what the diff did.
