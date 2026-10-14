@@ -1,5 +1,5 @@
 ---
-status: "accepted"
+status: "superseded by ADR-0010"
 date: 2026-10-12
 decision-makers: maintainer
 consulted: none
@@ -7,6 +7,15 @@ informed: plugin users
 ---
 
 # Judge the account balance by runway, not as information only
+
+
+> **Superseded in part by [ADR-0010](0010-print-the-pool-balance-without-its-credited-total.md)**
+> (2026-10-14). The runway metric, thresholds, escalation, dot rank and toast
+> trigger below still hold. The **rendering** of the balance does not: the
+> sentence no longer carries `total_credits` as its denominator, the toast
+> strings lose `of {limit} left`, and the popover's `Balance:` line no longer
+> shows `Lifetime:`. See that record for why the denominator read as
+> reassurance rather than as an alarm.
 
 ## Context and Problem Statement
 

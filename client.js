@@ -818,8 +818,10 @@ window.__ModuleLoader__.load({
         lifetime: true,
         balanceUsd: balance,
         remainingUsd: balance,
-        // `of {limit} left` reads as "of what was ever credited", which is the
-        // honest denominator for a pool that only refills by hand.
+        // The credited total. Kept on the shape for the record, but no sentence
+        // prints it any more (ADR-0010): it is a figure no other surface shows,
+        // so a reader cannot check it, and `of {limit} left` reads as "still
+        // available" — the opposite of what this alarm means.
         limitUsd: total,
         // The consumed share of the credited total — the percentage the balance
         // block shows, so its meter fills like the key meters instead of
@@ -912,17 +914,27 @@ window.__ModuleLoader__.load({
      *
      * `localeId` selects the plural form for the two numerals in the sentence; it
      * is optional so the three-argument call still works, and defaults to English.
+     *
+     * `options.pool` drops the denominator. A key cap is a figure the reader set
+     * and can see elsewhere, so "X of Y left" is a subtraction they can check. The
+     * pool's denominator is `total_credits` — every dollar ever credited — which
+     * no other surface prints: the reader cannot derive it, and `of {limit} left`
+     * invites the reading that Y is still available, which is the opposite of the
+     * alarm this sentence exists to raise. The money left is the whole message.
      */
-    function limitSentence(state, money, t, localeId) {
+    function limitSentence(state, money, t, localeId, options) {
       // The active locale decides the plural form. Absent means English, so the
       // three-argument call the older tests use still renders a sentence.
       const locale = localeId || 'en';
       if (state === undefined) return undefined;
       const flagged = state.level !== 'none';
-      const parts = [t('limitLeft', {
-        left: money.fmt(state.remainingUsd),
-        limit: money.fmt(state.limitUsd),
-      })];
+      const pool = options?.pool === true;
+      const parts = [pool
+        ? t('limitBalanceLeft', { left: money.fmt(state.remainingUsd) })
+        : t('limitLeft', {
+          left: money.fmt(state.remainingUsd),
+          limit: money.fmt(state.limitUsd),
+        })];
       // A share of a lifetime cap is not the figure a decision turns on: the
       // countdown is. The percentage rides only on a cap that refills.
       if (flagged && !state.lifetime && state.percent !== undefined) {
@@ -1349,18 +1361,16 @@ window.__ModuleLoader__.load({
 
       // The balance toast (ADR-0007) speaks in money and days, not in a
       // percentage of a period the pool does not have: there is no period.
-      // {left} is the remaining balance and {limit} the total ever credited,
-      // the same "of what was ever credited" reading the popover sentence has.
+      // {left} is the remaining balance; the credited total is deliberately
+      // absent (ADR-0010), for the reason the popover sentence gives.
       const message = props.balance === true
         ? (estimate !== undefined
           ? t(level === 'critical' ? 'limitToastBalanceCritical' : 'limitToastBalanceWarn', {
             left: money.fmt(state.remainingUsd),
-            limit: money.fmt(state.limitUsd),
             estimate,
           })
           : t(level === 'critical' ? 'limitToastBalanceCriticalNoEstimate' : 'limitToastBalanceWarnNoEstimate', {
             left: money.fmt(state.remainingUsd),
-            limit: money.fmt(state.limitUsd),
           }))
         : (estimate !== undefined
           ? t(level === 'critical' ? 'limitToastCritical' : 'limitToastWarn', {
@@ -1657,11 +1667,13 @@ window.__ModuleLoader__.load({
               : t('limitUnknownMatch'),
           };
         } else if (balanceTakes) {
-          // The sentence speaks in money and days: "… of … left · ~N days at
-          // this rate", with "shared by all keys" naming the pool, because
-          // that is what the reader came for and what the block used to omit.
+          // The sentence speaks in money and days: "… left · ~N days at this
+          // rate", with "shared by all keys" naming the pool, because that is
+          // what the reader came for and what the block used to omit. The
+          // credited total is not part of it (ADR-0010): it is the one figure
+          // no other surface prints.
           const sentence = balanceNotice !== undefined
-            ? limitSentence(balanceNotice, money, t, activeLocaleId)
+            ? limitSentence(balanceNotice, money, t, activeLocaleId, { pool: true })
             : undefined;
           const parts = [sentence, t('limitShared')].filter(part => part !== undefined);
           quota = {
@@ -1780,8 +1792,13 @@ window.__ModuleLoader__.load({
               onRaised: refresh,
             })
             : null,
+          // The pool's own line. It carries the balance alone: the lifetime
+          // figure beside it (total spent, not credited) was the number that
+          // made the two readings collide — `Balance: 2712 ₽ · Lifetime: 22557 ₽`
+          // sits one line under a sentence that showed 25268 ₽, a third figure
+          // nothing on screen accounted for (ADR-0010).
           balance === undefined ? null : h('div', { className: 'ors-sub' },
-            `${t('balance')}: ${money.fmt(balance)} · ${t('lifetime')}: ${money.fmt(data.credits.totalUsage)}`),
+            `${t('balance')}: ${money.fmt(balance)}`),
           // A session read that failed must say so: the chip silently drops its
           // pair, and without a sentence here that would look like a chat that
           // spent nothing rather than one whose split could not be read.
@@ -2200,7 +2217,6 @@ window.__ModuleLoader__.load({
             last30: '30 days',
             requests: 'requests',
             balance: 'Balance',
-            lifetime: 'Lifetime',
             byModel: 'Model',
             byKey: 'API key',
             allKeys: 'All keys',
@@ -2242,6 +2258,10 @@ window.__ModuleLoader__.load({
             limitKey: 'API key limit',
             limitBalance: 'Account balance',
             limitLeft: '{left} of {limit} left',
+            // The pool's sentence (ADR-0010): the money left, and nothing else
+            // to divide it by. See `limitSentence` for why the credited total
+            // is not a denominator a reader can use.
+            limitBalanceLeft: '{left} left',
             limitConsumed: '{percent}% used',
             periodToday: 'today',
             periodWeek: 'this week',
@@ -2281,12 +2301,13 @@ window.__ModuleLoader__.load({
             limitToastWarnNoEstimate: 'Key "{name}" is running low: {percent}% of {period}\u2019s {limit}.',
             limitToastCriticalNoEstimate: 'Key "{name}" is nearly exhausted: {percent}% of {period}\u2019s {limit}.',
             // The balance toast (ADR-0007): money and days, never a percentage
-            // of a period the pool does not have. {limit} is the total ever
-            // credited — the honest denominator for a pool that refills by hand.
-            limitToastBalanceWarn: 'Account balance is running low: {left} of {limit} left \u2014 ~{estimate} at the recent pace.',
-            limitToastBalanceCritical: 'Account balance is nearly exhausted: {left} of {limit} left \u2014 ~{estimate} at the recent pace. Top up to keep working.',
-            limitToastBalanceWarnNoEstimate: 'Account balance is running low: {left} of {limit} left.',
-            limitToastBalanceCriticalNoEstimate: 'Account balance is nearly exhausted: {left} of {limit} left. Top up to keep working.',
+            // of a period the pool does not have. {left} is the money left and
+            // carries the sentence alone: the credited total is not a
+            // denominator a reader can check (ADR-0010).
+            limitToastBalanceWarn: 'Account balance is running low: {left} left \u2014 ~{estimate} at the recent pace.',
+            limitToastBalanceCritical: 'Account balance is nearly exhausted: {left} left \u2014 ~{estimate} at the recent pace. Top up to keep working.',
+            limitToastBalanceWarnNoEstimate: 'Account balance is running low: {left} left.',
+            limitToastBalanceCriticalNoEstimate: 'Account balance is nearly exhausted: {left} left. Top up to keep working.',
             // The raise (ADR-0008): {amount} is the offered new cap, {limit}
             // the current one, {reason} the route's refusal. `raiseTo` is
             // shared by the toast button and the popover's offer, so the two
@@ -2307,7 +2328,6 @@ window.__ModuleLoader__.load({
             last30: '30 天',
             requests: '请求',
             balance: '余额',
-            lifetime: '累计',
             byModel: '模型',
             byKey: 'API 密钥',
             allKeys: '全部密钥',
@@ -2349,6 +2369,7 @@ window.__ModuleLoader__.load({
             limitKey: '密钥限额',
             limitBalance: '账户余额',
             limitLeft: '剩余 {left}，共 {limit}',
+            limitBalanceLeft: '剩余 {left}',
             limitConsumed: '已用 {percent}%',
             periodToday: '今天',
             periodWeek: '本周',
@@ -2378,10 +2399,10 @@ window.__ModuleLoader__.load({
             limitToastCritical: '密钥"{name}"限额即将耗尽：已用{period}{limit}的{percent}% — 按此速度约剩{estimate}。',
             limitToastWarnNoEstimate: '密钥"{name}"限额偏低：已用{period}{limit}的{percent}%。',
             limitToastCriticalNoEstimate: '密钥"{name}"限额即将耗尽：已用{period}{limit}的{percent}%。',
-            limitToastBalanceWarn: '账户余额偏低：{limit} 中剩余 {left} — 按此速度约 {estimate}。',
-            limitToastBalanceCritical: '账户余额即将耗尽：{limit} 中剩余 {left} — 按此速度约 {estimate}。请充值以继续使用。',
-            limitToastBalanceWarnNoEstimate: '账户余额偏低：{limit} 中剩余 {left}。',
-            limitToastBalanceCriticalNoEstimate: '账户余额即将耗尽：{limit} 中剩余 {left}。请充值以继续使用。',
+            limitToastBalanceWarn: '账户余额偏低：剩余 {left} — 按此速度约 {estimate}。',
+            limitToastBalanceCritical: '账户余额即将耗尽：剩余 {left} — 按此速度约 {estimate}。请充值以继续使用。',
+            limitToastBalanceWarnNoEstimate: '账户余额偏低：剩余 {left}。',
+            limitToastBalanceCriticalNoEstimate: '账户余额即将耗尽：剩余 {left}。请充值以继续使用。',
             raiseLabel: '提高限额',
             raiseTo: '提高到 {amount}',
             raiseToRub: '提高到 {amount} · ≈ {rub}',
@@ -2398,7 +2419,6 @@ window.__ModuleLoader__.load({
             last30: '30 дней',
             requests: 'запросов',
             balance: 'Баланс',
-            lifetime: 'Всего',
             byModel: 'Модель',
             byKey: 'API-ключ',
             allKeys: 'Все ключи',
@@ -2440,6 +2460,7 @@ window.__ModuleLoader__.load({
             limitKey: 'Лимит ключа',
             limitBalance: 'Баланс аккаунта',
             limitLeft: 'Осталось {left} из {limit}',
+            limitBalanceLeft: 'Осталось {left}',
             limitConsumed: 'израсходовано {percent}%',
             periodToday: 'сегодня',
             periodWeek: 'на этой неделе',
@@ -2477,10 +2498,10 @@ window.__ModuleLoader__.load({
             limitToastCritical: 'Лимит ключа "{name}" почти исчерпан: израсходовано {percent}% лимита {period} ({limit}) — при таком темпе осталось ~{estimate}.',
             limitToastWarnNoEstimate: 'Лимит ключа "{name}" подходит к концу: израсходовано {percent}% лимита {period} ({limit}).',
             limitToastCriticalNoEstimate: 'Лимит ключа "{name}" почти исчерпан: израсходовано {percent}% лимита {period} ({limit}).',
-            limitToastBalanceWarn: 'Баланс аккаунта подходит к концу: осталось {left} из {limit} — при таком темпе ~{estimate}.',
-            limitToastBalanceCritical: 'Баланс аккаунта почти исчерпан: осталось {left} из {limit} — при таком темпе ~{estimate}. Пополните, чтобы продолжить работу.',
-            limitToastBalanceWarnNoEstimate: 'Баланс аккаунта подходит к концу: осталось {left} из {limit}.',
-            limitToastBalanceCriticalNoEstimate: 'Баланс аккаунта почти исчерпан: осталось {left} из {limit}. Пополните, чтобы продолжить работу.',
+            limitToastBalanceWarn: 'Баланс аккаунта подходит к концу: осталось {left} — при таком темпе ~{estimate}.',
+            limitToastBalanceCritical: 'Баланс аккаунта почти исчерпан: осталось {left} — при таком темпе ~{estimate}. Пополните, чтобы продолжить работу.',
+            limitToastBalanceWarnNoEstimate: 'Баланс аккаунта подходит к концу: осталось {left}.',
+            limitToastBalanceCriticalNoEstimate: 'Баланс аккаунта почти исчерпан: осталось {left}. Пополните, чтобы продолжить работу.',
             raiseLabel: 'Поднять лимит',
             raiseTo: 'Поднять до {amount}',
             raiseToRub: 'Поднять до {amount} · ≈ {rub}',

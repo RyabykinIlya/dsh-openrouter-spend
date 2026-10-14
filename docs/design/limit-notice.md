@@ -195,17 +195,32 @@ show — the block is the balance's:
 ```
 Account balance                                               97%
 ████████████████████████████████████████████████████████████░░
-$6.58 of $241 left · ~1 day at this rate · shared by all keys
+$6.58 left · ~1 day at this rate · shared by all keys
 ```
 
 The label is `Account balance`, and the block carries the `limitBalanceHint`
-tooltip naming what the pool is — "3%" alone names no denominator, which is
-the confusion the old line produced. The meter fills with the **consumed**
-share of the credited total (`$234 of $241` is 97% consumed), matching the key
-meters' direction, and the sentence states money, days, and the shared-pool
-fact in that order, because the money is what the reader came for. In this
-state the key limit is not shown: one number beats two, and "top up" is the
-action either way.
+tooltip naming what the pool is — a percentage alone names no denominator,
+which is the confusion the old line produced. The meter fills with the
+**consumed** share of the credited total (`$234 of $241` is 97% consumed),
+matching the key meters' direction, and the sentence states money, days, and
+the shared-pool fact in that order, because the money is what the reader came
+for.
+
+The sentence carries **no denominator** ([ADR-0010](../adr/0010-print-the-pool-balance-without-its-credited-total.md)).
+A key cap is a figure the reader set and can see elsewhere, so `$6.40 of $25.00
+left` is a subtraction they can check. The pool's denominator is
+`total_credits` — every dollar ever credited — which no other surface prints:
+the reader cannot derive it, and `of $241 left` invites the reading that $241
+is still available, which is the opposite of what the alarm means. Measured on
+the reported account, the block read `2712.12 ₽ of 25268.86 ₽ left` while the
+line beneath it said `Balance: 2712.12 ₽`: three figures on one panel, and the
+largest one — the sum of the other two — appeared nowhere else. The popover's
+own `Balance:` line therefore lost its `Lifetime:` half as well, because that
+figure (total spent) is what made the credited total look derivable when it
+never was.
+
+In this state the key limit is not shown: one number beats two, and "top up"
+is the action either way.
 
 The dot carries the **stricter of the two alarms** — a key at a healthy 31% of
 its own daily cap does not paint the dot blue while the pool behind it has a
@@ -398,6 +413,7 @@ New keys, with the form the Russian and Chinese blocks should take:
 | `limitKey` | `API key limit` | `Лимит ключа` | `密钥限额` |
 | `limitBalance` | `Account balance` | `Баланс аккаунта` | `账户余额` |
 | `limitLeft` | `{left} of {limit} left` | `Осталось {left} из {limit}` | `剩余 {left}，共 {limit}` |
+| `limitBalanceLeft` | `{left} left` | `Осталось {left}` | `剩余 {left}` |
 | `limitConsumed` | `{percent}% used` | `израсходовано {percent}%` | `已用 {percent}%` |
 | `periodToday` | `today` | `сегодня` | `今天` |
 | `periodWeek` | `this week` | `на этой неделе` | `本周` |
@@ -450,10 +466,10 @@ it, so the percentage and the cap have to be in the sentence itself. `{name}` is
 | `limitToastCritical` | `Key "{name}" is nearly exhausted: {percent}% of {period}'s {limit} — ~{estimate} left at this rate.` | `Лимит ключа "{name}" почти исчерпан: израсходовано {percent}% лимита {period} ({limit}) — при таком темпе осталось ~{estimate}.` | `密钥"{name}"限额即将耗尽：已用{period}{limit}的{percent}% — 按此速度约剩{estimate}。` |
 | `limitToastWarnNoEstimate` | `Key "{name}" is running low: {percent}% of {period}'s {limit}.` | `Лимит ключа "{name}" подходит к концу: израсходовано {percent}% лимита {period} ({limit}).` | `密钥"{name}"限额偏低：已用{period}{limit}的{percent}%。` |
 | `limitToastCriticalNoEstimate` | `Key "{name}" is nearly exhausted: {percent}% of {period}'s {limit}.` | `Лимит ключа "{name}" почти исчерпан: израсходовано {percent}% лимита {period} ({limit}).` | `密钥"{name}"限额即将耗尽：已用{period}{limit}的{percent}%。` |
-| `limitToastBalanceWarn` | `Account balance is running low: {left} of {limit} left — ~{estimate} at the recent pace.` | `Баланс аккаунта подходит к концу: осталось {left} из {limit} — при таком темпе ~{estimate}.` | `账户余额偏低：{limit} 中剩余 {left} — 按此速度约 {estimate}。` |
-| `limitToastBalanceCritical` | `Account balance is nearly exhausted: {left} of {limit} left — ~{estimate} at the recent pace. Top up to keep working.` | `Баланс аккаунта почти исчерпан: осталось {left} из {limit} — при таком темпе ~{estimate}. Пополните, чтобы продолжить работу.` | `账户余额即将耗尽：{limit} 中剩余 {left} — 按此速度约 {estimate}。请充值以继续使用。` |
-| `limitToastBalanceWarnNoEstimate` | `Account balance is running low: {left} of {limit} left.` | `Баланс аккаунта подходит к концу: осталось {left} из {limit}.` | `账户余额偏低：{limit} 中剩余 {left}。` |
-| `limitToastBalanceCriticalNoEstimate` | `Account balance is nearly exhausted: {left} of {limit} left. Top up to keep working.` | `Баланс аккаунта почти исчерпан: осталось {left} из {limit}. Пополните, чтобы продолжить работу.` | `账户余额即将耗尽：{limit} 中剩余 {left}。请充值以继续使用。` |
+| `limitToastBalanceWarn` | `Account balance is running low: {left} left — ~{estimate} at the recent pace.` | `Баланс аккаунта подходит к концу: осталось {left} — при таком темпе ~{estimate}.` | `账户余额偏低：剩余 {left} — 按此速度约 {estimate}。` |
+| `limitToastBalanceCritical` | `Account balance is nearly exhausted: {left} left — ~{estimate} at the recent pace. Top up to keep working.` | `Баланс аккаунта почти исчерпан: осталось {left} — при таком темпе ~{estimate}. Пополните, чтобы продолжить работу.` | `账户余额即将耗尽：剩余 {left} — 按此速度约 {estimate}。请充值以继续使用。` |
+| `limitToastBalanceWarnNoEstimate` | `Account balance is running low: {left} left.` | `Баланс аккаунта подходит к концу: осталось {left}.` | `账户余额偏低：剩余 {left}。` |
+| `limitToastBalanceCriticalNoEstimate` | `Account balance is nearly exhausted: {left} left. Top up to keep working.` | `Баланс аккаунта почти исчерпан: осталось {left}. Пополните, чтобы продолжить работу.` | `账户余额即将耗尽：剩余 {left}。请充值以继续使用。` |
 | `limitToastDismiss` | `Dismiss` | `Закрыть` | `关闭` |
 
 The `*NoEstimate` pair exists because a failed hourly read leaves no runway to name (§5 of

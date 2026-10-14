@@ -593,7 +593,7 @@ test('the dictionary carries every limit key in all three languages', () => {
   // The host half reads the same list, and the browser half must not ship a key
   // that resolves to itself in one language and a sentence in another.
   const required = [
-    'limitKey', 'limitBalance', 'limitLeft', 'limitConsumed',
+    'limitKey', 'limitBalance', 'limitLeft', 'limitBalanceLeft', 'limitConsumed',
     'periodToday', 'periodWeek', 'periodMonth',
     'limitResets', 'limitResetsIn', 'limitLeftAtRate', 'limitApproxRequests',
     'limitDaysAtRate', 'limitUnderADay', 'limitShared', 'limitTightest',
@@ -981,6 +981,60 @@ test('the Russian sentence counts requests in the right form for 1, 2 and 5', ()
   assert.equal(threeArg, limitSentence(one, money, t, 'en'));
   assert.ok(threeArg.startsWith('Осталось $0.02 из $25.00'), threeArg);
   assert.ok(threeArg.includes('≈ 1 запрос'), threeArg);
+});
+
+test('the pool sentence carries no denominator, and a key cap keeps its own', () => {
+  // ADR-0010. The pool's `{limit}` is `total_credits` — every dollar ever
+  // credited — and it is printed on no other surface: the reader cannot check
+  // it, and "of $241 left" reads as "$241 is still available", the opposite of
+  // what the alarm means. Measured on the maintainer's account the block read
+  // `2712.12 ₽ of 25268.86 ₽ left` while the panel's own line said
+  // `Balance: 2712.12 ₽ · Lifetime: 22556.74 ₽` — 25268.86 being their sum.
+  const money = { fmt: v => `$${v.toFixed(2)}` };
+  const t = dict => (key, params) => (dict[key] ?? key)
+    .replace(/\{(\w+)\}/g, (match, name) => (name in params ? String(params[name]) : match));
+
+  const pool = balanceState({ credits: credits(6.58), burn: unionBurn(NOW, [2, 2, 2, 2, 2]), nowMs: NOW });
+  const poolLine = limitSentence(pool, money, t(dicts.en), 'en', { pool: true });
+  assert.equal(poolLine, '$6.58 left · ~3 days at this rate',
+    `the pool sentence is money and days, nothing to divide by — got ${poolLine}`);
+  assert.ok(!poolLine.includes('$241'), `the credited total must not appear: ${poolLine}`);
+  assert.equal(money.fmt(pool.limitUsd), '$241.00',
+    'the credited total is still on the state — the sentence is what drops it');
+
+  // The same state rendered WITHOUT the flag is a key cap's sentence, and a key
+  // cap keeps its denominator: the reader set that cap and can see it again, so
+  // "of $25.00 left" is a subtraction they can check.
+  const cap = limitState({
+    limit: 25, limitRemaining: 6.4, limitReset: null,
+    burn: burnFor(NOW, 0.8, 5), nowMs: NOW,
+  });
+  const capLine = limitSentence(cap, money, t(dicts.en), 'en');
+  assert.ok(capLine.includes('$6.40 of $25.00 left'), `a key cap keeps its denominator: ${capLine}`);
+
+  // The pool sentence exists in all three shipped languages with the same
+  // placeholder contract — `{left}` only, never `{limit}`.
+  const renders = { en: 'left', ru: 'Осталось', zh: '剩余' };
+  for (const [lang, expected] of Object.entries(renders)) {
+    const dict = dicts[lang];
+    assert.ok(dict.limitBalanceLeft.includes('{left}'), `${lang} must keep {left}: ${dict.limitBalanceLeft}`);
+    assert.ok(!dict.limitBalanceLeft.includes('{limit}'), `${lang} must not carry {limit}: ${dict.limitBalanceLeft}`);
+    const rendered = limitSentence(pool, money, t(dict), lang, { pool: true });
+    assert.ok(rendered.includes(expected), `${lang} pool sentence must render: ${rendered}`);
+    assert.ok(!rendered.includes('241'), `${lang} pool sentence must not print the total: ${rendered}`);
+  }
+
+  // The four balance toasts lost the denominator too; the key toast kept it.
+  const balanceToastKeys = ['limitToastBalanceWarn', 'limitToastBalanceCritical',
+    'limitToastBalanceWarnNoEstimate', 'limitToastBalanceCriticalNoEstimate'];
+  for (const key of balanceToastKeys) {
+    for (const lang of ['en', 'zh', 'ru']) {
+      assert.ok(!dicts[lang][key].includes('{limit}'),
+        `${lang} ${key} must not carry the credited total: ${dicts[lang][key]}`);
+      assert.ok(dicts[lang][key].includes('{left}'), `${lang} ${key} must keep {left}`);
+    }
+  }
+  assert.ok(dicts.en.limitToastWarn.includes('{limit}'), 'the key toast keeps the cap it names');
 });
 
 test('apply reads the active locale, and survives a host that offers neither', () => {
@@ -1892,9 +1946,9 @@ function balanceAlarmPayload() {
 }
 
 test('a critical balance takes the block, the dot and the sentence', async () => {
-  // The end-to-end rendering of ADR-0007: the key is quiet, the pool is not,
-  // and the popover says the pool — with money, days, and a denominator,
-  // not the old bare "3%".
+  // The end-to-end rendering of ADR-0007's metric with ADR-0010's copy: the key
+  // is quiet, the pool is not, and the popover says the pool — in money and
+  // days, with no denominator and no "Lifetime" figure beside it.
   const stand = loadWithFetch(balanceAlarmPayload(), Date.UTC(2026, 9, 11, 21, 0, 0), {
     'ors.limitNotice': '1',
     'ors.keyId': 'dh',
@@ -1907,11 +1961,18 @@ test('a critical balance takes the block, the dot and the sentence', async () =>
   assert.equal(quota.props['data-level'], 'critical', `the pool's level must take the block — got ${quota.props['data-level']}`);
   assert.equal(quota.props.title, dicts.en.limitBalanceHint, 'the block must carry the pool tooltip');
   assert.ok(text.includes('Account balance'), `the label must name the pool: ${text}`);
-  // The old line's failure was a percent of nothing: the new one states the
-  // money, the credited total it is part of, the time left, and the pool fact.
-  assert.ok(text.includes('$6.58 of $241.00 left'), `the sentence must carry the money: ${text}`);
+  // ADR-0010: the sentence is money and days. The credited total ($241) is not
+  // in it — it is printed nowhere else in the panel, so a reader cannot check
+  // it, and "of $241 left" reads as "$241 is still available".
+  assert.ok(text.includes('$6.58 left'), `the sentence must carry the money: ${text}`);
+  assert.ok(!text.includes('$241'), `the credited total must not be printed: ${text}`);
+  assert.ok(!text.includes(' of '), `the sentence must carry no denominator: ${text}`);
   assert.ok(text.includes('shared by all keys'), `the sentence must name the pool: ${text}`);
   assert.ok(text.includes('under a day'), `the runway must be said: ${text}`);
+  // The panel's own balance line carries the balance alone; `Lifetime` was the
+  // figure that made the credited total above look derivable.
+  assert.ok(text.includes('Balance: $6.58'), `the pool line must carry the balance: ${text}`);
+  assert.ok(!/Lifetime/.test(text), `the pool line must not carry the lifetime spend: ${text}`);
   const pct = textOf(findByClass(quota, 'ors-quota-pct')).join('');
   assert.equal(pct, '97%', `the meter percent is the CONSUMED share of the credited total — got ${pct}`);
 
