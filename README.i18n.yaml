@@ -3,6 +3,6 @@
 # After updating translations, run: npm run verify-translation -- --write
 
 hashes:
-  en: fafdb8f847ca7774
-  zh: b342d325589d2c17
-  ru: 1701c706ac813f22
+  en: 64d7a824e7376c62
+  zh: 238c8a70c3c4d43c
+  ru: 859771bc8ab5914b

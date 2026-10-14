@@ -36,7 +36,8 @@
 - **Chip popover** — range and API-key filters, today's spend per model, a daily bar chart across the window, prepaid balance and lifetime spend.
 - **Settings → OpenRouter spend** — store or clear the management key, pick the display currency (USD, or RUB at the cbr.ru rate), set the refresh interval, filter by API key.
 - **Limit warning** — off by default. Turn it on in Settings and the popover shows how much of the tracked key's limit is left: the share consumed, how long the remainder lasts at the current pace, and when the cap refills. The chip's dot turns amber and then red as the cap approaches, and a toast fires once when the level escalates.
-- **Account balance warning** — the prepaid balance is judged like the lifetime cap it is: when it buys under three days at the median account pace (under one day, or at the mean of the last three days, is critical) the dot alarms, the popover's balance block says the money, the days and the denominator — `$6.58 of $241 left · under a day at this rate · shared by all keys` — instead of a bare percent, and a toast says to top up. See [ADR 0007](https://github.com/RyabykinIlya/dsh-openrouter-spend/blob/main/docs/adr/0007-judge-the-account-balance-by-runway.md).
+- **Account balance warning** — the prepaid balance is judged like the lifetime cap it is: when it buys under three days at the median account pace (under one day, or at the mean of the last three days, is critical) the dot alarms, the popover's balance block says the money and the days it buys — `$6.58 left · under a day at this rate · shared by all keys` — instead of a bare percent or a total the panel shows nowhere else, and a toast says to top up. See [ADR 0007](https://github.com/RyabykinIlya/dsh-openrouter-spend/blob/main/docs/adr/0007-judge-the-account-balance-by-runway.md) for the metric and [ADR 0010](https://github.com/RyabykinIlya/dsh-openrouter-spend/blob/main/docs/adr/0010-print-the-pool-balance-without-its-credited-total.md) for the sentence.
+- **Raise the limit** — the limit block, and the toast when it fires, offer the raise that keeps the cap from stopping work: one click raises the key's spend limit through the same management key. The offered figure follows the amount and the pace — the cap plus the period's burn for a period cap that is burning fast, half again as much otherwise — with a custom field beside it for a figure of your own. Only a raise is accepted, and at most 10× the current cap; a key that carries no limit has to be given one in OpenRouter first. A `$10` daily cap at `$8.50` burned offers `$18.5`. The offer is stated in the account's own money (USD) — that figure is what is sent — with your display currency beside it as a read-only echo, `Raise to $15.00 · ≈ 2114.67 ₽`, which disappears when cbr.ru is unreachable. See [ADR 0008](https://github.com/RyabykinIlya/dsh-openrouter-spend/blob/main/docs/adr/0008-raise-a-key-limit-from-the-popover.md).
 
 The host half caches the summary for `refreshSeconds` and coalesces concurrent refreshes, so any number of open tabs cost one OpenRouter query per refresh window. When a refresh fails, the last good figures stay on screen and the reason is shown instead of an empty panel: the popover names the fault, counts down to the next automatic attempt (15 seconds after the first failure, then 30, then the ordinary interval), and offers **Retry now** to read again immediately.
 
@@ -56,7 +57,7 @@ dsh plugin --profile web add dsh-openrouter-spend
 From GitHub (plain JavaScript, no build step and no build-script permission):
 
 ```sh
-dsh plugin --profile web add github:RyabykinIlya/dsh-openrouter-spend#v0.5.0
+dsh plugin --profile web add github:RyabykinIlya/dsh-openrouter-spend#v0.6.0
 ```
 
 Then open Settings → OpenRouter spend and paste the management key.
@@ -95,7 +96,8 @@ Viewing preferences (display currency, per-key filter, refresh interval override
 ## Security
 
 - The management key is stored through the Harness credentials service (`credentials.set`), not in this package's files, and is never echoed back to the browser.
-- The summary and credential routes are fenced by the connection trust check. Anyone who passes that check — by default, the browser session on your local Harness port — can read your spend figures. Do not expose the Harness web port publicly without its own authentication.
+- The summary, credential and limit-raise routes are fenced by the connection trust check. Anyone who passes that check — by default, the browser session on your local Harness port — can read your spend figures and raise a key's limit. Do not expose the Harness web port publicly without its own authentication.
+- The limit raise sends the management key in the `Authorization` header and the key's **name** in the body; the key's hash is resolved host-side and never travels to the browser.
 
 ## License
 

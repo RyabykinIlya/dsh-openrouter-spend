@@ -35,7 +35,8 @@
 - **芯片弹出窗口** — 时间范围和 API 密钥过滤器、今日每个模型的支出、时间窗口内的每日条形图、预付余额和累计支出。
 - **设置 → OpenRouter spend** — 存储或清除管理密钥、选择显示货币（美元或按 cbr.ru 汇率的卢布）、设置刷新间隔、按 API 密钥过滤。
 - **限额提醒** — 默认关闭。在设置中开启后，弹出窗口会显示所跟踪密钥的限额还剩多少：已用比例、按当前速度剩余额度还能用多久，以及限额何时重置。随着限额逼近，芯片上的圆点先变黄再变红，级别升级时弹出一次通知。
-- **账户余额提醒** — 预付余额按它本来的 lifetime 限额来评估：当它按账户支出的中位速度撑不到三天（不到一天——或按最近三天的平均——即为严重）时，圆点会告警，弹出窗口的余额块会说明金额、剩余时间和分母——「剩余 $6.58，共 $241 · 按此速度不足一天 · 所有密钥共用」——而不是一个孤零零的百分比，通知也会提示充值。见 [ADR 0007](https://github.com/RyabykinIlya/dsh-openrouter-spend/blob/main/docs/adr/0007-judge-the-account-balance-by-runway.md)。
+- **账户余额提醒** — 预付余额按它本来的 lifetime 限额来评估：当它按账户支出的中位速度撑不到三天（不到一天——或按最近三天的平均——即为严重）时，圆点会告警，弹出窗口的余额块会说明金额以及它能撑多久——「剩余 $6.58 · 按此速度不足一天 · 所有密钥共用」——而不是一个孤零零的百分比，或一个面板上别处都看不到的总数，通知也会提示充值。评估方法见 [ADR 0007](https://github.com/RyabykinIlya/dsh-openrouter-spend/blob/main/docs/adr/0007-judge-the-account-balance-by-runway.md)，措辞见 [ADR 0010](https://github.com/RyabykinIlya/dsh-openrouter-spend/blob/main/docs/adr/0010-print-the-pool-balance-without-its-credited-total.md)。
+- **提高限额** — 限额块（以及触发时的通知）提供不让限额中断工作的操作：一键即可用同一个管理密钥提高密钥的支出限额。建议金额取决于金额与消耗速度——消耗较快的周期限额取限额加上本周期已消耗额，其他情况取一倍半——旁边还有自定义金额输入框。只接受提高，且最多为当前限额的 10 倍；本身没有限额的密钥需先在 OpenRouter 中设置。日限额 `$10`、已消耗 `$8.50` 时建议 `$18.5`。建议金额以账户本身的货币（USD）显示——发送的就是这个数字——您的显示货币作为只读参考紧随其后：「提高到 $15.00 · ≈ 2114.67 ₽」；cbr.ru 不可用时该参考会消失。见 [ADR 0008](https://github.com/RyabykinIlya/dsh-openrouter-spend/blob/main/docs/adr/0008-raise-a-key-limit-from-the-popover.md)。
 
 主机端缓存摘要 `refreshSeconds` 秒并合并并发刷新，因此任意数量的打开标签页在每个刷新窗口内只需查询 OpenRouter 一次。当刷新失败时，最后的有效数据保留在屏幕上，原因显示在空面板的位置：面板会说明故障原因，倒计时到下次自动尝试（首次失败后 15 秒，之后 30 秒，然后恢复普通间隔），并提供**立即重试**按钮以立刻重新读取。
 
@@ -55,7 +56,7 @@ dsh plugin --profile web add dsh-openrouter-spend
 从 GitHub 安装（纯 JavaScript，无构建步骤和构建脚本权限）：
 
 ```sh
-dsh plugin --profile web add github:RyabykinIlya/dsh-openrouter-spend#v0.5.0
+dsh plugin --profile web add github:RyabykinIlya/dsh-openrouter-spend#v0.6.0
 ```
 
 然后打开 Settings → OpenRouter spend 并粘贴管理密钥。
@@ -94,7 +95,8 @@ dsh plugin --profile web add github:RyabykinIlya/dsh-openrouter-spend#v0.5.0
 ## 安全性
 
 - 管理密钥通过 Harness 凭据服务（`credentials.set`）存储，而不是在此包的文件中，并且永远不会回显到浏览器。
-- 摘要和凭据路由受连接信任检查保护。通过该检查的任何人 — 默认情况下，本地 Harness 端口上的浏览器会话 — 都可以读取您的支出数据。未经自己的身份验证，请勿公开 Harness Web 端口。
+- 摘要、凭据和提高限额路由受连接信任检查保护。通过该检查的任何人 — 默认情况下，本地 Harness 端口上的浏览器会话 — 都可以读取您的支出数据并提高密钥限额。未经自己的身份验证，请勿公开 Harness Web 端口。
+- 提高限额时，管理密钥通过 `Authorization` 请求头发送，请求体中只带密钥**名称**；其 hash 由主机端解析，不会传到浏览器。
 
 ## 许可证
 
