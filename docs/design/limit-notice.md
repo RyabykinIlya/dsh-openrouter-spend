@@ -281,6 +281,48 @@ The meter is drawn empty and greyed rather than filled, the percentage is `—` 
 number, and the sentence is the `limitUnavailable` string. No limit state is derived, so the
 dot stays `ok` — but the popover no longer implies that everything is fine.
 
+### Raising the limit
+
+The block reports; it can also act. When the tracked key carries a limit, a raise row sits
+under the sentence:
+
+```
+API key limit · build-bot                                        85%
+█████████████████████████████████████████████████████████░░░░░░
+$1.50 of $10.00 left · 85% used · resets 03:00 · ~45 min at this rate
+Raise the limit  [ Raise to $18.5 ]  [ over $10.00 ] [ Raise ]
+```
+
+The offer is printed in the **account's own money** — dollars — with the reader's
+currency as an echo when a rate is available (`Raise to $19.20 · ≈ 2707 ₽`), because this is the
+one figure on the row that is *sent* rather than read: a label promising rubles while the wire
+receives dollars is exactly how `1300` became `$1300` and tripped the `10×` ceiling
+(ADR-0009). The spend sentence directly above keeps the display currency, so the two units sit
+on one row by design; the custom field and its placeholder stay in dollars for the same reason.
+
+The offer is **dynamic, and the rule is stated on the button**: a period cap that is burning
+fast offers its cap plus one period's burn — enough to finish *this* period at the pace that
+raised the alarm — while a slow period and every lifetime cap (whose pace is daily, not
+periodic) offer ×1.5. Both are rounded to **dimes**, the finest grain OpenRouter carries, and
+both land at least a dime above the cap, so the button is always a raise and never a no-op
+wearing one. The custom field beside it exists because the rule is a default, not a
+substitute for a figure; it accepts a comma as the decimal separator, rounds to dimes, and
+disables its own button — with the reason in its `title`, never silently — for any value at
+or below the current cap.
+
+The row renders only for a tracked key that carries a limit. The other shapes of the block
+have nothing this route could raise: `Account balance` is a pool that refills by hand and
+`Limit unknown` is a cap the host could not match to a key, so a raise beside either would be
+a button that cannot act.
+
+A completed raise answers with the new cap and retires the host cache ([ADR-0008](../adr/0008-raise-a-key-limit-from-the-popover.md)),
+so the sentence directly above the button changes in the same breath as the click. The toast
+carries the same offer beside *Dismiss* — it is the escalation itself, and the figure is the
+one action that keeps the cap from stopping work — while the **balance** toast has no raise,
+because the pool has no cap to raise and "top up" is its action. A refusal is shown verbatim
+(`Could not raise: …`): the words are the route's or OpenRouter's, and "not a raise" and
+"could not reach OpenRouter" are different problems to fix.
+
 ## Chip
 
 The chip text does not change. It carries the session/day pair and the dot; adding a second
@@ -418,6 +460,27 @@ The `*NoEstimate` pair exists because a failed hourly read leaves no runway to n
 HANDOFF): the toast still fires on the level change but drops the estimate rather than
 inventing one.
 
+The raise. `{amount}` is the offered new cap and `{limit}` the current one, both rendered as
+money; `raiseTo` is shared by the popover's offer and the toast's button, so the two surfaces
+cannot promise different figures. `{reason}` is the route's refusal, carried verbatim:
+
+| Key | en | ru | zh |
+|---|---|---|---|
+| `raiseLabel` | `Raise the limit` | `Поднять лимит` | `提高限额` |
+| `raiseTo` | `Raise to {amount}` | `Поднять до {amount}` | `提高到 {amount}` |
+| `raiseToRub` | `Raise to {amount} · ≈ {rub}` | `Поднять до {amount} · ≈ {rub}` | `提高到 {amount} · ≈ {rub}` |
+| `raiseCustomLabel` | `Custom limit, USD` | `Свой лимит, USD` | `自定义限额，USD` |
+| `raiseCustomPlaceholder` | `over {limit}` | `больше {limit}` | `高于 {limit}` |
+| `raiseCustomRefused` | `Enter a value above {limit} — only a raise is accepted.` | `Введите значение больше {limit} — принимается только повышение.` | `请输入高于 {limit} 的值——仅接受提高。` |
+| `raiseApply` | `Raise` | `Поднять` | `提高` |
+| `raiseFailed` | `Could not raise: {reason}` | `Не удалось поднять: {reason}` | `无法提高：{reason}` |
+
+`raiseToRub` is the form used when the panel has a rate: `{amount}` is the figure that will be
+**sent** — USD, the account's own unit, whatever the panel displays — and `{rub}` the same money
+at the rate the spend sentence above already uses. The echo is read-only: never parsed back,
+never sent. With cbr.ru down the label falls to `raiseTo`, so a failed rate read costs the echo
+and nothing else (ADR-0009).
+
 `{when}` in `limitResets` is a **rendered local time** (`03:00`), formatted at render, not a
 translated word — there is no `resets at midnight` string, because the boundary is UTC
 midnight and only local rendering tells the truth for the reader's zone.
@@ -512,9 +575,13 @@ these hex values; that needs the GUI, and was measured once here.
 
 ## What this design does not do
 
-* No automatic mitigation — the plugin does not switch keys, disable one, or raise a limit.
-  It reports.
+* No automatic mitigation — the plugin does not switch keys, disable one, or
+  **lower** a limit. It reports, and (ADR-0008) it raises a cap when the reader
+  asks it to: the one action the alarm's own subject has.
 * No history of limit changes; only the current value from the last poll.
 * No forecast across keys — each key is judged on its own series, and the balance on the
   account's union burn (ADR-0007); neither extrapolates a pace into a projected total.
 * No per-model limit awareness; OpenRouter's limits are per key.
+* No raise of anything but `limit` — the reset schedule, `disabled` and the BYOK
+  inclusion keep their own settings in the dashboard, where the plugin does not
+  know what they should be.

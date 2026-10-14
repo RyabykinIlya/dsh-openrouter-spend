@@ -22,6 +22,13 @@ window.__ModuleLoader__.load({
     const SUMMARY_URL = '/openrouter-spend/summary';
 
     /**
+     * The host's raise route. The body carries the key's NAME — the identifier
+     * the popover already shows — never the hash: the host resolves the name
+     * and carries the hash upstream, so the public payload stays hash-free.
+     */
+    const KEY_LIMIT_URL = '/openrouter-spend/key-limit';
+
+    /**
      * The locale `apply` last saw. Factory scope, not component state: a plural
      * form is chosen while building a string, and the components read the active
      * locale only to pick one. English until `apply` hears otherwise, so a host
@@ -139,6 +146,45 @@ window.__ModuleLoader__.load({
    known. It is rendered rather than omitted — silence reads as health. */
 .ors-quota[data-level="unknown"] .ors-quota-fill { background: var(--dsw-alias-label-tertiary); }
 .ors-quota[data-level="unknown"] .ors-quota-pct { color: var(--dsw-alias-label-tertiary); }
+/* The raise row: one offered figure, one custom field, one apply button —
+   three controls of the same size, so no one of them reads as the action
+   and another as a decoration. The error line under them carries the
+   route's refusal verbatim. */
+.ors-raise-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 8px; }
+.ors-raise-btn {
+  padding: 3px 10px; border: 0; border-radius: 6px; cursor: pointer;
+  background: var(--dsw-alias-interactive-bg-hover, transparent);
+  color: var(--dsw-alias-label-primary);
+  font: var(--dsw-font-xxs-12, 12px/1.4 system-ui);
+  font-variant-numeric: tabular-nums;
+}
+.ors-raise-btn:hover:not(:disabled) { background: var(--dsw-alias-interactive-bg-hover-solid, var(--dsw-alias-interactive-bg-hover)); }
+.ors-raise-btn:disabled { cursor: default; color: var(--dsw-alias-label-tertiary); }
+.ors-raise-input {
+  width: 72px; padding: 3px 8px; border: 0.5px solid var(--dsw-alias-border-l2);
+  border-radius: 6px;
+  background: var(--dsw-alias-bg-base, transparent);
+  color: var(--dsw-alias-label-primary);
+  font: var(--dsw-font-xxs-12, 12px/1.4 system-ui);
+  font-variant-numeric: tabular-nums;
+}
+.ors-raise-input:focus { outline: 0.5px solid var(--dsw-alias-state-business-primary); }
+.ors-raise-error {
+  margin-top: 6px; color: var(--dsw-alias-state-error-primary);
+  font: var(--dsw-font-xxs-12, 12px/1.4 system-ui); word-break: break-word;
+}
+/* The toast's raise sits beside the dismissal in the actions row, the same
+   shape as the panel's raise button, so the two surfaces agree on what the
+   action looks like. */
+.ors-toast-raise {
+  padding: 3px 10px; border: 0; border-radius: 6px; cursor: pointer;
+  background: var(--dsw-alias-interactive-bg-hover, transparent);
+  color: var(--dsw-alias-label-primary);
+  font: var(--dsw-font-xxs-12, 12px/1.4 system-ui);
+  font-variant-numeric: tabular-nums;
+}
+.ors-toast-raise:hover:not(:disabled) { background: var(--dsw-alias-interactive-bg-hover-solid, var(--dsw-alias-interactive-bg-hover)); }
+.ors-toast-raise:disabled { cursor: default; color: var(--dsw-alias-label-tertiary); }
 .ors-toast {
   position: fixed; bottom: 24px; right: 24px; z-index: 1000; max-width: 400px;
   padding: 14px 16px; border-radius: 12px;
@@ -210,6 +256,16 @@ window.__ModuleLoader__.load({
         perUsd: rub ? rate : undefined,
         symbol: rub ? '₽' : '$',
         fmt,
+        /**
+         * The display currency, bypassed. A figure that is about to be SENT to
+         * OpenRouter has to read in the money OpenRouter counts in, or the
+         * button promises one number and posts another: a key's `limit` is a
+         * USD figure on the account whatever the panel is displaying, so the
+         * raise row's offer, its field's placeholder and its refusal reason,
+         * and the toast's button all print dollars while the sentence beside
+         * them keeps the user's own currency (ADR-0008).
+         */
+        fmtUsd: value => fmtMoney(Number(value) || 0, 'USD'),
         /**
          * Two figures under one currency sign — `session/day` reads as one
          * money pair, not as two amounts (`$0.85/$1.50`, `0.85/1.50 ₽`).
@@ -547,6 +603,82 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * Money is never sub-dime: OpenRouter itself keeps two decimals, so a raise
+     * offered or entered in finer grains is a number the account cannot carry.
+     */
+    function roundedToDimes(usd) {
+      return Math.round(usd * 10) / 10;
+    }
+
+    /**
+     * The new limit a raise offers FIRST, before any typing: the figure the
+     * button can name so the reader can act without doing arithmetic. Pure —
+     * `limitState` calls it while building its own result.
+     *
+     * The rule is dynamic by design (the user asked for "depends on the amount
+     * and the speed"):
+     *
+     * - a period cap that is burning fast offers its cap plus one period's
+     *   burn — enough to finish THIS period at the pace that raised the
+     *   alarm. `periodBurnUsd` is what the period burned so far, so at the
+     *   same pace the raise buys roughly a full extra period;
+     * - anything else (a slow period, or a lifetime cap, whose pace lives in
+     *   `perDayUsd` and not in a period figure) offers half again as much —
+     *   enough headroom to see the next warning coming without doubling a
+     *   budget somebody set on purpose.
+     *
+     * The result is at least a dime above the cap, so the offer is always a
+     * raise; the custom field beside it accepts anything above the cap that
+     * the account can carry.
+     * @param input - `{ cap, periodBurnUsd, lifetime }` as `limitState` knows them.
+     * @returns the offer in whole dimes, or `undefined` when there is no cap.
+     */
+    function suggestedRaise(input) {
+      const cap = Number(input?.cap);
+      if (!Number.isFinite(cap) || cap <= 0) return undefined;
+      const pace = Number(input?.periodBurnUsd);
+      const fast = input?.lifetime === false && Number.isFinite(pace) && pace > 0;
+      const goal = fast ? cap + pace : cap * 1.5;
+      return roundedToDimes(Math.max(goal, cap + 0.1));
+    }
+
+    /**
+     * The raise's label, in the money the wire counts in. `{amount}` is the
+     * figure that will be SENT — USD, whatever the panel displays — and `{rub}`
+     * is the same money at the rate the limit sentence beside it is already
+     * using, so a reader who thinks in rubles can still judge the size without
+     * converting in their head (ADR-0009).
+     *
+     * The echo is a decoration and never an input: it renders only when the
+     * panel has a rate, it is never parsed back, and with cbr.ru down the label
+     * falls to the plain USD wording rather than to a third state. A write whose
+     * value depended on an auxiliary read would change meaning exactly when that
+     * read fails, which is why the conversion lives here and not on the way to
+     * the route.
+     */
+    function raiseOfferLabel(money, t, amount) {
+      const usd = money.fmtUsd(amount);
+      if (!money.rub) return t('raiseTo', { amount: usd });
+      return t('raiseToRub', { amount: usd, rub: money.fmt(amount) });
+    }
+
+    /**
+     * Read the custom raise field. A comma is accepted as a decimal separator
+     * — the reader is typing a figure, not programming — and the result is
+     * rounded to dimes, the finest grain the account carries. `minimumUsd` is
+     * the current cap (rounded the same way): only a raise is an offer, so a
+     * value at or below it is refused as `undefined` and the field says why.
+     * @returns the raise in whole dimes, or `undefined` when it is not one.
+     */
+    function parseRaiseInput(value, minimumUsd) {
+      const raw = typeof value === 'string' ? value.replace(',', '.') : value;
+      const parsed = Number(raw);
+      if (!Number.isFinite(parsed)) return undefined;
+      if (minimumUsd !== undefined && !(parsed > minimumUsd)) return undefined;
+      return roundedToDimes(parsed);
+    }
+
+    /**
      * The level of one key's limit, or `none` when nothing is known. Pure: the
      * caller supplies the clock and the previous level, which is what makes the
      * hysteresis testable rather than a side effect.
@@ -577,6 +709,11 @@ window.__ModuleLoader__.load({
       const runwayMs = peak > 0 ? (remainingUsd / peak) * MS_PER_HOUR : undefined;
       const avgRequestUsd = Number(input?.avgRequestUsd);
       const lifetime = limitReset === null || limitReset === undefined;
+      // What the cap has burned so far, the pace a raise offer sizes itself
+      // from. Only a period has one — a lifetime cap's pace is daily and
+      // lives in `perDayUsd` — so it is undefined here and reappears as a
+      // published field on the periodic branch's return alone.
+      const periodBurnUsd = lifetime ? undefined : Math.round((cap - remainingUsd) * 100) / 100;
       const shared = {
         // The raw `limitReset` rides along (M1): the toast reads it to name
         // the period the cap refills on, and without it every periodic-cap
@@ -584,8 +721,17 @@ window.__ModuleLoader__.load({
         // — the consumers compare it against the wire's own vocabulary.
         limitReset,
         limitUsd: cap,
+        // The whole-dollar faces the raise button, so the button and the
+        // sentence cannot disagree about what the cap is. Same rounding as
+        // `percentRounded`, driven by the same rule: the figure on a button
+        // is a promise about the figure in the sentence.
+        limitUsdRounded: Math.round(cap * 100) / 100,
         remainingUsd,
         percent,
+        // The button label carries the percentage the meter does (M-something:
+        // never two figures of the same share on one screen), so the rounding
+        // lives here rather than at the call site that would forget it.
+        percentRounded: Math.round(percent),
         lifetime,
         resetAtMs,
         untilResetMs: resetAtMs === undefined ? undefined : resetAtMs - nowMs,
@@ -601,6 +747,13 @@ window.__ModuleLoader__.load({
         requests: Number.isFinite(avgRequestUsd) && avgRequestUsd > 0
           ? Math.floor(remainingUsd / avgRequestUsd)
           : undefined,
+        // The new limit a raise button offers first, in the account's own
+        // money. Rounded to dimes — money is never sub-dime — and computed by
+        // `suggestedRaise`'s rule (there) so the toast's button and the
+        // popover's offer the same figure. The period burn rides along, so a
+        // cap that is burning through its period offers enough to finish
+        // this one at the pace that raised the alarm.
+        raiseToUsd: suggestedRaise({ cap: Math.round(cap * 100) / 100, periodBurnUsd, lifetime }),
       };
 
       if (lifetime) {
@@ -634,7 +787,7 @@ window.__ModuleLoader__.load({
         // have; this says what actually happens next, which is the refill.
         imminent = true;
       }
-      return { level, ...shared, consumed, imminent };
+      return { level, ...shared, periodBurnUsd, consumed, imminent };
     }
 
     /**
@@ -1072,13 +1225,118 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * One raise in flight per surface. `submit` posts the raise and, on
+     * success, hands control to `onRaised` — the surface's own force-refresh,
+     * which is what turns the raise into figures on screen (the route retires
+     * the host cache, so the refresh reads upstream). A refusal lands in
+     * `error` verbatim — the words are the route's or the wire's, never
+     * invented here, because "could not raise" and "not a raise" are
+     * different problems to fix.
+     */
+    function useRaise(name, onRaised) {
+      const [busy, setBusy] = useState(false);
+      const [error, setError] = useState(undefined);
+      const submit = useCallback(async value => {
+        if (busy) return;
+        setBusy(true);
+        setError(undefined);
+        try {
+          const response = await fetch(KEY_LIMIT_URL, {
+            method: 'POST',
+            credentials: 'same-origin',
+            headers: { 'content-type': 'application/json', accept: 'application/json' },
+            body: JSON.stringify({ name, limit: value }),
+          });
+          const reply = await response.json().catch(() => undefined);
+          if (!response.ok || !reply || reply.status !== 'ok') {
+            setError(typeof reply?.error === 'string' ? reply.error : `HTTP ${response.status}`);
+            return;
+          }
+          if (typeof onRaised === 'function') onRaised();
+        } catch (cause) {
+          setError(cause instanceof Error ? cause.message : String(cause));
+        } finally {
+          setBusy(false);
+        }
+      }, [busy, name, onRaised]);
+      return { busy, error, submit };
+    }
+
+    /**
+     * The raise row under the limit block: the offered figure as one button,
+     * a custom field beside it, and the refusal the route or the field gave.
+     * Rendered only for a tracked key that carries a limit — the other
+     * surfaces of the block (`limitBalance`, `limitUnknown`) have no cap this
+     * route could raise, and a button that cannot act is a lie.
+     */
+    function QuotaActions(props) {
+      const { name, state, money, t, onRaised } = props;
+      const { busy, error, submit } = useRaise(name, onRaised);
+      const [custom, setCustom] = useState('');
+      // The pure reads ride the component so a test can drive them through
+      // the factory seam; the hook keeps the render from growing a second
+      // copy of the rule.
+      if (state === undefined || !(state.limitUsdRounded > 0)) return null;
+      const cap = state.limitUsdRounded;
+      const offer = state.raiseToUsd;
+      const parsed = parseRaiseInput(custom, cap);
+      const customUsable = custom.trim() !== '' && parsed !== undefined;
+      const apply = () => { if (customUsable) void submit(parsed); };
+      if (offer === undefined) return null;
+      return h('div', { className: 'ors-raise' },
+        h('div', { className: 'ors-raise-row' },
+          h('span', { className: 'ors-label' }, t('raiseLabel')),
+          h('button', {
+            type: 'button',
+            className: 'ors-raise-btn',
+            disabled: busy,
+            onClick: () => void submit(offer),
+          }, raiseOfferLabel(money, t, offer)),
+          h('input', {
+            type: 'text',
+            inputMode: 'decimal',
+            className: 'ors-raise-input',
+            'aria-label': t('raiseCustomLabel'),
+            placeholder: t('raiseCustomPlaceholder', { limit: money.fmtUsd(cap) }),
+            value: custom,
+            disabled: busy,
+            onChange: event => setCustom(event.target.value),
+            onKeyDown: event => { if (event.key === 'Enter') apply(); },
+          }),
+          h('button', {
+            type: 'button',
+            className: 'ors-raise-btn',
+            disabled: busy || !customUsable,
+            // The disabled state is explained rather than silent: a value at
+            // or below the cap is exactly the typo the field has to name.
+            title: custom.trim() !== '' && !customUsable
+              ? t('raiseCustomRefused', { limit: money.fmtUsd(cap) })
+              : undefined,
+            onClick: apply,
+          }, t('raiseApply'))),
+        error === undefined ? null
+          : h('div', { className: 'ors-raise-error' }, t('raiseFailed', { reason: error })));
+    }
+
+    /**
      * The limit escalation toast. Shown frame-wide when a tracked key crosses a
      * threshold, dismissed on click or explicit close, retired when the popover
      * opens or the same escalation is seen.
      */
     function Toast(props) {
       const { keyId, level, state, money, t, onDismiss, onOpen } = props;
+      // The raise is the toast's action for a KEY cap (ADR-0008): the account
+      // balance has no cap to raise — its pool refills only by hand — so the
+      // balance toast keeps its "open the popover / top up" pair instead.
+      //
+      // The hook runs BEFORE the early return below: a toast that rendered with
+      // it and then early-returned — the level dropping to `none` while the
+      // overlay still held the escalation — would change the hook count between
+      // renders, which React rejects outright. Hooks first, decisions after.
+      const { busy: raiseBusy, error: raiseError, submit: raiseSubmit }
+        = useRaise(keyId, props.onRaised);
       if (!state || level === 'none') return null;
+      const canRaise = props.balance !== true && state.raiseToUsd !== undefined;
 
       const percent = Math.round(state.percent ?? 0);
       const limit = money.fmt(state.limitUsd);
@@ -1128,8 +1386,23 @@ window.__ModuleLoader__.load({
           tabIndex: 0,
           onKeyDown: event => { if (event.key === 'Enter' || event.key === ' ') onOpen(); },
         }, message),
-        h('div', { className: 'ors-toast-actions' },
-          h('button', { type: 'button', onClick: onDismiss }, t('limitToastDismiss'))));
+        h('div', {
+          className: 'ors-toast-actions',
+        },
+          // The offer rides the toast because the toast is the escalation
+          // itself: the reader was interrupted to be told the cap is running
+          // out, and the figure beside the dismissal is the one action that
+          // keeps the cap from stopping work.
+          canRaise ? h('button', {
+            type: 'button',
+            className: 'ors-toast-raise',
+            disabled: raiseBusy,
+            onClick: () => void raiseSubmit(state.raiseToUsd),
+          }, raiseOfferLabel(money, t, state.raiseToUsd)) : null,
+          h('button', { type: 'button', onClick: onDismiss }, t('limitToastDismiss'))),
+        canRaise && raiseError !== undefined
+          ? h('div', { className: 'ors-raise-error' }, t('raiseFailed', { reason: raiseError }))
+          : null);
     }
 
     function Pill(props) {
@@ -1495,6 +1768,18 @@ window.__ModuleLoader__.load({
                 style: { width: `${Math.max(0, Math.min(100, quota.pct ?? 0))}%` },
               })),
             h('div', { className: 'ors-quota-note' }, quota.note)),
+          // The raise row: only for a tracked key that carries a limit, and
+          // only while the limit read is good — a raise offered beside a
+          // failed read would raise a cap the figures cannot name.
+          noticeOn && keyId !== '' && keyLimit !== undefined
+            ? h(QuotaActions, {
+              name: keyId,
+              state: noticeState,
+              money,
+              t,
+              onRaised: refresh,
+            })
+            : null,
           balance === undefined ? null : h('div', { className: 'ors-sub' },
             `${t('balance')}: ${money.fmt(balance)} · ${t('lifetime')}: ${money.fmt(data.credits.totalUsage)}`),
           // A session read that failed must say so: the chip silently drops its
@@ -1579,7 +1864,7 @@ window.__ModuleLoader__.load({
       const balanceLevelRef = useRef('none');
       // The overlay has no interval preference of its own: it reads on the
       // host's schedule, which is the same one the chip follows.
-      const { data } = useSummaryPoll(0);
+      const { data, refresh } = useSummaryPoll(0);
 
       // Sync preferences from other components.
       useEffect(() => {
@@ -1711,6 +1996,9 @@ window.__ModuleLoader__.load({
         t,
         onDismiss: handleDismiss,
         onOpen: handleOpen,
+        // The refresh that must follow a raise (see `Toast`): the toast is
+        // the escalation's own action.
+        onRaised: refresh,
       });
     }
 
@@ -1884,6 +2172,13 @@ window.__ModuleLoader__.load({
       peakHourlyBurn,
       windowedBurn,
       closedDayTotals,
+      // The raise's pure pieces (ADR-0008): the offer rule and the custom
+      // field's reader, on the plugin object for the same reason as the rest.
+      suggestedRaise,
+      raiseOfferLabel,
+      parseRaiseInput,
+      roundedToDimes,
+      useRaise,
       apply(ctx) {
         // The active locale drives the plural form, so it is tracked here rather
         // than read per render. Both reads are feature-detected: a host (or a
@@ -1992,6 +2287,18 @@ window.__ModuleLoader__.load({
             limitToastBalanceCritical: 'Account balance is nearly exhausted: {left} of {limit} left \u2014 ~{estimate} at the recent pace. Top up to keep working.',
             limitToastBalanceWarnNoEstimate: 'Account balance is running low: {left} of {limit} left.',
             limitToastBalanceCriticalNoEstimate: 'Account balance is nearly exhausted: {left} of {limit} left. Top up to keep working.',
+            // The raise (ADR-0008): {amount} is the offered new cap, {limit}
+            // the current one, {reason} the route's refusal. `raiseTo` is
+            // shared by the toast button and the popover's offer, so the two
+            // surfaces cannot promise different figures.
+            raiseLabel: 'Raise the limit',
+            raiseTo: 'Raise to {amount}',
+            raiseToRub: 'Raise to {amount} · ≈ {rub}',
+            raiseCustomLabel: 'Custom limit, USD',
+            raiseCustomPlaceholder: 'over {limit}',
+            raiseCustomRefused: 'Enter a value above {limit} \u2014 only a raise is accepted.',
+            raiseApply: 'Raise',
+            raiseFailed: 'Could not raise: {reason}',
             limitToastDismiss: 'Dismiss',
           },
           zh: {
@@ -2075,6 +2382,14 @@ window.__ModuleLoader__.load({
             limitToastBalanceCritical: '账户余额即将耗尽：{limit} 中剩余 {left} — 按此速度约 {estimate}。请充值以继续使用。',
             limitToastBalanceWarnNoEstimate: '账户余额偏低：{limit} 中剩余 {left}。',
             limitToastBalanceCriticalNoEstimate: '账户余额即将耗尽：{limit} 中剩余 {left}。请充值以继续使用。',
+            raiseLabel: '提高限额',
+            raiseTo: '提高到 {amount}',
+            raiseToRub: '提高到 {amount} · ≈ {rub}',
+            raiseCustomLabel: '自定义限额，USD',
+            raiseCustomPlaceholder: '高于 {limit}',
+            raiseCustomRefused: '请输入高于 {limit} 的值——仅接受提高。',
+            raiseApply: '提高',
+            raiseFailed: '无法提高：{reason}',
             limitToastDismiss: '关闭',
           },
           ru: {
@@ -2166,6 +2481,14 @@ window.__ModuleLoader__.load({
             limitToastBalanceCritical: 'Баланс аккаунта почти исчерпан: осталось {left} из {limit} — при таком темпе ~{estimate}. Пополните, чтобы продолжить работу.',
             limitToastBalanceWarnNoEstimate: 'Баланс аккаунта подходит к концу: осталось {left} из {limit}.',
             limitToastBalanceCriticalNoEstimate: 'Баланс аккаунта почти исчерпан: осталось {left} из {limit}. Пополните, чтобы продолжить работу.',
+            raiseLabel: 'Поднять лимит',
+            raiseTo: 'Поднять до {amount}',
+            raiseToRub: 'Поднять до {amount} · ≈ {rub}',
+            raiseCustomLabel: 'Свой лимит, USD',
+            raiseCustomPlaceholder: 'больше {limit}',
+            raiseCustomRefused: 'Введите значение больше {limit} — принимается только повышение.',
+            raiseApply: 'Поднять',
+            raiseFailed: 'Не удалось поднять: {reason}',
             limitToastDismiss: 'Закрыть',
           },
         });

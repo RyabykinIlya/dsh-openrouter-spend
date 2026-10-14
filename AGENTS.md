@@ -16,7 +16,7 @@ documentation (see CONTRIBUTING.md); READMEs are mirrored in ru/zh.
 
 | Path | What it is |
 | --- | --- |
-| `index.js` | Cordis server half. `apply(ctx, config)` registers `GET /openrouter-spend/summary` and `POST /openrouter-spend/credential`, polls the OpenRouter API. Pure helpers are exported for tests. |
+| `index.js` | Cordis server half. `apply(ctx, config)` registers `GET /openrouter-spend/summary`, `POST /openrouter-spend/credential` and `POST /openrouter-spend/key-limit` (the raise, ADR-0008), polls the OpenRouter API. Pure helpers are exported for tests. |
 | `client.js` | Browser half, a **plain script body** registered through `window.__ModuleLoader__` — not an ES module. Pure helpers ride on the plugin object so tests can reach them. |
 | `locale/*.json` | Plugin display metadata only. The UI dictionaries are inline in `client.js` (en/zh/ru) and are registered through `locale.register`. |
 | `tests/` | `node:test` suites. Two seams exist: import from `../index.js`, and load `client.js` through the module-loader seam (`runInNewContext` + stubbed `window.__ModuleLoader__`, then `captured.factory(...)`). Dictionaries are read via a `locale.register` capture in `api.apply` — never by slicing the source. |
@@ -97,7 +97,13 @@ In this environment npm's default cache is broken — always pass
   design-doc test compares per language). When copy changes, update the doc
   rows — never change shipped strings to match the doc.
 - Placeholder sets are contract: `{reason}`, `{time}`, `{name}`, `{percent}`,
-  `{estimate}`, `{left}`, `{limit}` must survive every translation.
+  `{estimate}`, `{left}`, `{limit}`, `{amount}`, `{rub}` must survive every
+  translation. `{amount}` is the figure a raise SENDS and `{rub}` its echo in the
+  display currency (ADR-0009) — a value that reaches a write path is never
+  rendered through the currency converter.
+  The raise's keys (`raise*`, ADR-0008) are part of this vocabulary: they are
+  quoted verbatim in the design doc's table, and the deployment's own doc guard
+  reads every `^(limit|period|raise)` key.
 
 ## Release checklist
 

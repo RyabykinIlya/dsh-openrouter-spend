@@ -98,9 +98,15 @@ test('M1: every `state.X` the client reads is produced by some limitState branch
 });
 
 test('M1: each limitState branch returns exactly its documented shape', () => {
+  // The raise (ADR-0008) adds three fields to the shared shape:
+  // `limitUsdRounded`/`percentRounded` — the whole-dollar and whole-percent
+  // faces the raise button and the meter print — and `raiseToUsd`, the
+  // offered new cap. They are shared (not branch-specific) because every
+  // branch that shows a cap can be raised, whatever its reset schedule.
   const shared = [
-    'level', 'limitReset', 'limitUsd', 'remainingUsd', 'percent', 'lifetime',
-    'resetAtMs', 'untilResetMs', 'resetText', 'runwayMs', 'runwayText', 'requests',
+    'level', 'limitReset', 'limitUsd', 'limitUsdRounded', 'remainingUsd', 'percent',
+    'percentRounded', 'lifetime', 'resetAtMs', 'untilResetMs', 'resetText', 'runwayMs',
+    'runwayText', 'requests', 'raiseToUsd',
   ];
   assert.deepEqual(Object.keys(limitState({ limit: 0 })).sort(), ['level'],
     'the early-out shape carries only the level');
@@ -118,8 +124,10 @@ test('M1: each limitState branch returns exactly its documented shape', () => {
     'the lifetime branch adds perDayUsd and runwayDays');
   assert.deepEqual(
     Object.keys(limitState({ limit: 12, limitRemaining: 1.8, limitReset: 'daily', burn: [], nowMs: Date.UTC(2026, 9, 9, 12), thresholds: { warn: 0.4, critical: 0.8 } })).sort(),
-    [...shared, 'consumed', 'imminent'].sort(),
-    'the periodic branch adds consumed and imminent');
+    // `periodBurnUsd` is the periodic branch's own pace figure: what the
+    // period burned so far, which `suggestedRaise` sizes the offer from.
+    [...shared, 'consumed', 'imminent', 'periodBurnUsd'].sort(),
+    'the periodic branch adds consumed, imminent and the period burn');
 });
 
 test('m8: every failure code either half can emit has a sentence in all three languages', () => {

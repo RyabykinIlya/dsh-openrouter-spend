@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Raise a key's limit from the popover** — the limit block, and the toast when it fires, now offer the raise that keeps the cap from stopping work: one click raises the tracked key's spend limit through the same management key the plugin already reads with (`POST /openrouter-spend/key-limit` → OpenRouter's `PATCH /keys/{hash}`). The offered figure follows the amount and the pace: a period cap that is burning fast offers **cap + the period's burn so far** — enough to finish this period at the pace that raised the alarm, so a `$10` daily cap at `$8.50` burned offers `$18.5` — while a slow period and every lifetime cap offer **×1.5**, enough headroom to see the next warning coming without doubling a budget set on purpose. A custom field beside the offer takes a figure of your own (a comma works as the decimal separator); it rounds to whole dimes and explains a value at or below the cap rather than disabling silently. Only a raise is accepted, and at most `10×` the current limit — a leaked trailing zero is refused with the reason instead of spent — and a key that carries no limit is refused with the fix named (set one in OpenRouter first). The balance toast has no raise: the pool has no cap to raise, and "top up" is its action. A completed raise retires the host cache, so the sentence above the button changes with the click. Published payloads are unchanged: the browser sends the key's **name**, the host resolves it to the hash, and the hash — like the label and creator — still never leaves the host. See [ADR 0008](https://github.com/RyabykinIlya/dsh-openrouter-spend/blob/main/docs/adr/0008-raise-a-key-limit-from-the-popover.md).
+
+### Fixed
+
+- The raise row printed its figures in the **display currency** while sending them in **USD**: with RUB selected the offer button read `2114.67 ₽` and posted `15`, and the custom field's placeholder read `1409.80 ₽` while treating what was typed as dollars — so a figure typed in rubles arrived as dollars and tripped the `10×` typo ceiling (`Could not raise: the new limit (1300) is past 10x the current (15)`). The offer, the field's placeholder, its refusal reason and the toast's button now print the USD figure that is actually sent, with the reader's money beside it as an echo — `Raise to $15.00 · ≈ 2114.67 ₽` — which disappears when cbr.ru is unreachable, because a write must never depend on the rate read. See [ADR 0009](https://github.com/RyabykinIlya/dsh-openrouter-spend/blob/main/docs/adr/0009-print-the-raise-in-the-wires-own-money.md).
+
 ## [0.5.0] - 2026-10-12
 
 ### Added

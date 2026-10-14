@@ -14,6 +14,8 @@ lives here, the UI detail lives in [the design doc](../design/limit-notice.md).
 | 0005 | Surface a failed refresh and the schedule of the next attempt | accepted | 2026-10-09 |
 | 0006 | Scope the chip's session/day pair to one API key | accepted | 2026-10-11 |
 | 0007 | Judge the account balance by runway, not as information only | accepted | 2026-10-12 |
+| 0008 | Raise a key's limit from the popover through the management key | accepted | 2026-10-12 |
+| 0009 | Print the raise in the wire's own money, with the display currency as an echo | accepted | 2026-10-13 |
 
 ## Conventions
 

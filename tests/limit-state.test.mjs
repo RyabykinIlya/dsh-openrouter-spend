@@ -759,6 +759,112 @@ test('a key with spend but no matching limit is surfaced as unmatched', async ()
   assert.ok(!textOf(stillTree).join(' | ').includes('Limit unknown'));
 });
 
+/**
+ * Expand function-typed elements the way React would, one level at a time, so a
+ * finder can reach the host elements inside a component the panel renders.
+ * `expandComponent` does this once for the toast; the raise row is a component
+ * of its own that holds the raise's own state, so a test that wants its buttons
+ * has to expand it too. Depth-limited rather than unbounded: a self-referencing
+ * element in a broken render must not hang the suite.
+ */
+function expandDeep(node, depth = 6) {
+  if (node === null || node === undefined || typeof node !== 'object') return node;
+  if (Array.isArray(node)) return node.map(child => expandDeep(child, depth));
+  if (depth <= 0) return node;
+  if (typeof node.type === 'function') return expandDeep(node.type(node.props), depth - 1);
+  if (node.children === undefined) return node;
+  return { ...node, children: expandDeep(node.children, depth) };
+}
+
+test('the raise row renders under the limit block, and only where a raise is possible', async () => {
+  // ADR-0008's render path. The pure offer rule is pinned in
+  // `key-limit.test.mjs`; what that suite cannot see is whether the row reaches
+  // the panel at all, carries the offered figure, and stays away from the
+  // shapes that have no cap to raise (a failed limits read, an unmatched key).
+  // The warning payload is a `$12` daily cap with `$7.20` burned, so the offer
+  // is the cap plus the period burn: `$19.20`.
+  const stand = loadWithFetch(warnPayload(), Date.UTC(2026, 9, 9, 12, 0, 0), {
+    'ors.limitNotice': '1',
+    'ors.keyId': 'build-bot',
+  });
+  const tree = await openPanel(stand);
+  const row = findByClass(expandDeep(tree), 'ors-raise');
+  assert.ok(row, 'the limit block must carry the raise row for a tracked key with a limit');
+  const buttons = [];
+  const walk = node => {
+    if (node === null || node === undefined || typeof node !== 'object') return;
+    if (Array.isArray(node)) { node.forEach(walk); return; }
+    if (node.type === 'button') buttons.push(node);
+    if (node.type === 'input') buttons.push(node);
+    walk(node.children);
+  };
+  walk(row);
+  const offer = buttons.find(node => textOf(node).join('').includes('19.2'));
+  assert.ok(offer, `the offer button must name the offered cap — got ${JSON.stringify(buttons.map(b => textOf(b).join('')))}`);
+  assert.equal(offer.props.disabled, false, 'a tracked key in warn renders an enabled offer');
+  assert.ok(!textOf(offer).join('').includes('\u20bd'),
+    `with USD display the offer is dollars only — got ${JSON.stringify(textOf(offer).join(''))}`);
+  const input = buttons.find(node => node.type === 'input');
+  assert.ok(input, 'the custom field must be there beside the offer');
+  assert.equal(input.props.placeholder, 'over $12.00',
+    `the field must say what "above" means, in the money that will be sent — got ${JSON.stringify(input.props.placeholder)}`);
+  const apply = buttons.filter(node => node.type === 'button').find(node => textOf(node).join('') === dicts.en.raiseApply);
+  assert.ok(apply, 'the row must carry the apply button for the typed figure');
+  assert.equal(apply.props.disabled, true, 'an empty field cannot be applied, and says so by disabling');
+
+  // The reported bug (ADR-0009), rendered: with the display currency set to RUB
+  // the offer must still name the USD figure it will SEND, and carry the ruble
+  // equivalent as an echo. The sentence above keeps rubles — that is the point —
+  // so both units are present and neither is a mistake.
+  const rubStand = loadWithFetch(
+    { ...warnPayload(), rate: { perUsd: 140.98 } },
+    Date.UTC(2026, 9, 9, 12, 0, 0),
+    { 'ors.limitNotice': '1', 'ors.keyId': 'build-bot', 'ors.currency': 'RUB' },
+  );
+  const rubTree = await openPanel(rubStand);
+  const rubRow = findByClass(expandDeep(rubTree), 'ors-raise');
+  assert.ok(rubRow, 'the raise row renders in RUB display too');
+  const rubButtons = [];
+  const collect = node => {
+    if (node === null || node === undefined || typeof node !== 'object') return;
+    if (Array.isArray(node)) { node.forEach(collect); return; }
+    if (node.type === 'button') rubButtons.push(node);
+    if (node.type === 'input') rubButtons.push(node);
+    collect(node.children);
+  };
+  collect(rubRow);
+  const rubOffer = rubButtons.find(node => node.type === 'button' && textOf(node).join('').includes('$19.20'));
+  assert.ok(rubOffer, `the offer must lead with the dollars it sends — got ${JSON.stringify(rubButtons.map(b => textOf(b).join('')))}`);
+  const rubWords = textOf(rubOffer).join('');
+  assert.ok(rubWords.includes('\u2248') && rubWords.includes('\u20bd'),
+    `and echo the reader's own money — got ${JSON.stringify(rubWords)}`);
+  const rubInput = rubButtons.find(node => node.type === 'input');
+  assert.equal(rubInput.props.placeholder, 'over $12.00',
+    `the field stays in the sent money whatever the panel displays — got ${JSON.stringify(rubInput.props.placeholder)}`);
+  const sentence = textOf(findByClass(expandDeep(rubTree), 'ors-quota-note')).join('');
+  assert.ok(sentence.includes('\u20bd'),
+    `the spend sentence beside it keeps the display currency — got ${JSON.stringify(sentence)}`);
+
+  // The shapes with no cap to raise: an unmatched key (no limit row) and a cap
+  // the reader is nowhere near. A button that cannot act must not render.
+  const unmatched = await openPanel(loadWithFetch(unmatchedPayload(), Date.UTC(2026, 9, 9, 12, 0, 0), {
+    'ors.limitNotice': '1',
+    'ors.keyId': 'build-bot',
+  }));
+  assert.equal(findByClass(expandDeep(unmatched), 'ors-raise'), undefined,
+    'a key whose limit could not be matched has no cap to raise');
+
+  const comfortable = await openPanel(loadWithFetch(
+    unmatchedPayload({ limits: { 'build-bot': { limit: 12, limitRemaining: 11, limitReset: 'daily', disabled: false } } }),
+    Date.UTC(2026, 9, 9, 12, 0, 0),
+    { 'ors.limitNotice': '1', 'ors.keyId': 'build-bot' },
+  ));
+  // A cap at rest still shows its block but is not an alarm; the raise belongs to
+  // the escalation, and `limitState` returns `none` here, which is the gate.
+  assert.equal(findByClass(comfortable, 'ors-raise'), undefined,
+    'a cap nowhere near its limit offers no raise — the offer rides the escalation');
+});
+
 test('pluralCategory reads the CLDR category, and refuses to guess', () => {
   // Russian is the reason the helper exists: one/few/many are three distinct
   // forms of the same noun, and which one a numeral takes is a rule about its
@@ -1061,6 +1167,22 @@ function findByTag(node, tag) {
   return findByTag(node.children, tag);
 }
 
+/**
+ * A `<button>` whose text says `label`, for the toast, which now carries two
+ * buttons: the raise offer (ADR-0008) lands before the dismissal, so
+ * `findByTag('button')` returns the raise and a dismissal test would click the
+ * wrong action. Found by what it says, not by where it sits.
+ */
+function findButtonByText(node, label) {
+  if (node === null || node === undefined || typeof node !== 'object') return undefined;
+  if (Array.isArray(node)) {
+    for (const child of node) { const hit = findButtonByText(child, label); if (hit !== undefined) return hit; }
+    return undefined;
+  }
+  if (node.type === 'button' && textOf(node).includes(label)) return node;
+  return findButtonByText(node.children, label);
+}
+
 /** Every text node under a tree, skipping the CSS the components inline. */
 function textOf(node, out = []) {
   if (node === null || node === undefined || node === false) return out;
@@ -1314,7 +1436,7 @@ test('the toast overlay shows the escalation, and dismissing it retires it', asy
   const words = textOf(shown).join(' | ');
   assert.ok(words.includes('build-bot'), `the toast must name the key: ${words}`);
 
-  findByTag(shown, 'button').props.onClick(); // the dismiss button
+  findButtonByText(shown, 'Dismiss').props.onClick(); // the dismissal — the raise button sits before it
   for (let i = 0; i < 6; i += 1) { await flush(); if (toast.dirty) tree = toast.render(); }
   assert.equal(expandComponent(tree), null, 'the toast must be gone once dismissed');
   // The seen key is what keeps it gone, and it names the period (M2): a
@@ -1577,7 +1699,10 @@ test('the design doc documents every key the limit feature ships', () => {
   const union = new Set([...Object.keys(dicts.en), ...Object.keys(dicts.zh), ...Object.keys(dicts.ru)]);
   const rows = docRows();
   const missing = [...union]
-    .filter(key => /^(limit|period)/.test(key) && !rows.has(key))
+    // `raise*` joins the vocabulary with ADR-0008: the raise's keys are part of
+    // this feature's shipped copy, so a missing row for them is the same
+    // invisible gap this test exists to catch.
+    .filter(key => /^(limit|period|raise)/.test(key) && !rows.has(key))
     .sort();
   assert.deepEqual(missing, [], 'every limit-feature key must have a row in the doc table');
 });

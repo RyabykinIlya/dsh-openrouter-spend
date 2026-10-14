@@ -31,6 +31,22 @@ const SUMMARY_PATH = '/openrouter-spend/summary'
 /** Route that stores or clears the management key. */
 const CREDENTIAL_PATH = '/openrouter-spend/credential'
 
+/**
+ * Route that raises one key's spend limit. The body names the key by NAME —
+ * the identifier the popover already shows — because the hash never travels
+ * to the browser (this repo and its payloads are public), so this half is the
+ * one that resolves the name to the hash and carries it upstream.
+ */
+const KEY_LIMIT_PATH = '/openrouter-spend/key-limit'
+
+/**
+ * A raise past this multiple of the current limit is refused. The route is a
+ * button next to a number the reader recognises, so an extra zero in the
+ * custom field is the one typo the wire cannot tell from intent; the multiple
+ * turns it into a refusal that names itself rather than a spent balance.
+ */
+const RAISE_MAX_FACTOR = 10
+
 /** A credential body is one string; a larger one is hostile, not a real setting. */
 const MAX_BODY_BYTES = 64 * 1024
 
@@ -752,7 +768,7 @@ export function readKeyLimits(keysBody) {
 }
 
 /**
- * Fetch the account's API keys and narrow them to the per-key limits.
+ * Fetch the account's API key records, raw.
  *
  * The request states its scope rather than riding the endpoint's defaults,
  * which exclude exactly the keys a limit warning is about. `include_disabled`
@@ -768,8 +784,12 @@ export function readKeyLimits(keysBody) {
  * iterating workspaces would need a workspace listing plus one read per
  * workspace on every refresh — so a key outside it surfaces as "limit
  * unknown", the honest answer rather than a missing one.
+ *
+ * The rows are returned raw, hash included: the limits read narrows them
+ * before they reach the payload, and the raise needs the hash to name the
+ * key upstream — the two readers share this one walk.
  */
-async function queryKeys(config, credential, signal) {
+async function queryKeyRows(config, credential, signal) {
   const base = `${config.apiBase.replace(/\/+$/, '')}/keys`
   const rows = []
   const seenHashes = new Set()
@@ -807,7 +827,72 @@ async function queryKeys(config, credential, signal) {
       throw new Error(`keys listing grew to ${rows.length} rows, past the ${MAX_KEY_ROWS}-row ceiling; the pagination walk refused rather than loop`)
     }
   }
-  return readKeyLimits({ data: rows })
+  return rows
+}
+
+/**
+ * Fetch the keys and narrow them to the per-key limits. The narrowing contract
+ * is `readKeyLimits`'s own (see above); this is the walk plus that one call.
+ */
+async function queryKeys(config, credential, signal) {
+  return readKeyLimits({ data: await queryKeyRows(config, credential, signal) })
+}
+
+/**
+ * Raise one key's spend limit through the management key.
+ *
+ * The name is resolved to a hash through the same `/keys` walk the limits read
+ * uses, so the browser never has to carry the hash and the two halves cannot
+ * disagree about which key a name means — with one deliberate difference:
+ * ambiguity here is judged over EVERY key carrying the name, not only the
+ * limited ones `readKeyLimits` publishes, because the raise names a record,
+ * not a published entry, and OpenRouter identifies records by hash alone.
+ *
+ * Only a raise is accepted, and only within `RAISE_MAX_FACTOR` of the current
+ * limit: a button that lowers a cap would misread as a raise, and a raise two
+ * orders of magnitude up is a typo wearing intent.
+ *
+ * The refusals carry a `kind` the route maps to a status: `not-found` (404),
+ * `ambiguous` / `no-limit` / `invalid` (400), and anything from the PATCH
+ * itself, which stays a plain `upstreamError` (502).
+ * @returns `{ name, limit }` — the raise the account now carries.
+ */
+export async function raiseKeyLimit(config, credential, name, limit, signal) {
+  const rows = await queryKeyRows(config, credential, signal)
+  const matches = rows.filter(row => row !== null && typeof row === 'object'
+    && row.name === name && typeof row.hash === 'string' && row.hash.length > 0)
+  const refuse = (kind, message) => {
+    const error = new Error(message)
+    error.kind = kind
+    return error
+  }
+  if (matches.length === 0) {
+    throw refuse('not-found', `no key named "${name}" on the account`)
+  }
+  if (matches.length > 1) {
+    throw refuse('ambiguous', `keys named "${name}" share a name, and OpenRouter identifies a key by hash, so the raise cannot name one key — rename all but one in OpenRouter`)
+  }
+  const current = Number(matches[0].limit)
+  if (!Number.isFinite(current) || current <= 0) {
+    throw refuse('no-limit', `key "${name}" carries no finite limit, so there is no cap to raise — set a limit on it in OpenRouter first`)
+  }
+  if (!Number.isFinite(limit) || limit <= 0) {
+    throw refuse('invalid', `the new limit must be a finite number above zero, not ${limit}`)
+  }
+  if (limit <= current) {
+    throw refuse('invalid', `only a raise is accepted: the new limit (${limit}) is at or below the current (${current})`)
+  }
+  if (limit > current * RAISE_MAX_FACTOR) {
+    throw refuse('invalid', `the new limit (${limit}) is past ${RAISE_MAX_FACTOR}x the current (${current}); a raise that large is refused as a likely typo`)
+  }
+  const response = await fetch(`${config.apiBase.replace(/\/+$/, '')}/keys/${encodeURIComponent(matches[0].hash)}`, {
+    method: 'PATCH',
+    headers: { authorization: `Bearer ${credential}`, 'content-type': 'application/json' },
+    body: JSON.stringify({ limit }),
+    signal,
+  })
+  if (!response.ok) throw await upstreamError('keys/{hash}', response)
+  return { name, limit }
 }
 
 /**
@@ -1138,6 +1223,28 @@ async function readBoundedBody(req) {
   return Buffer.concat(chunks, size).toString('utf8')
 }
 
+/**
+ * Validate the key-limit body at the wire: an object with a non-empty `name`
+ * and a finite `limit`. A `Number()` read rather than `typeof === 'number'`,
+ * because a JSON `10` and an OpenRouter string `"10"` are both a limit the
+ * account can carry; what is refused is what no figure can be.
+ * @returns `{ name, limit }`, or `undefined` when the body is not a raise.
+ */
+export function parseKeyLimitBody(text) {
+  let body
+  try {
+    body = JSON.parse(text)
+  } catch {
+    // A non-JSON body is exactly the refusal case.
+    return undefined
+  }
+  if (body === null || typeof body !== 'object') return undefined
+  if (typeof body.name !== 'string' || body.name.length === 0) return undefined
+  const limit = Number(body.limit)
+  if (!Number.isFinite(limit)) return undefined
+  return { name: body.name, limit }
+}
+
 /** Validate the credential body at the wire: an object with `value` or `clear`. */
 function parseCredentialBody(text) {
   let body
@@ -1343,8 +1450,9 @@ export function apply(ctx, config) {
         return
       }
       try {
-        // `?force=1` is the popover's Retry: answer with a fresh read, not the
-        // cached one. The cache itself is still what a plain poll gets.
+        // `?force=1` is the popover's Retry — and the confirming read after a
+        // raise (ADR-0008): the raise route retires the cache, so both are
+        // answered from upstream rather than a pre-raise entry.
         const url = new URL(req.url ?? '/', 'http://localhost')
         sendJson(res, 200, await current(url.searchParams.get('force') === '1'))
       } catch (error) {
@@ -1405,6 +1513,80 @@ export function apply(ctx, config) {
       }
     },
   }), `openrouter-spend: POST ${CREDENTIAL_PATH}`)
+
+  /**
+   * The raise route: `{ name, limit }` → the account's answer, or a refusal.
+   *
+   * The same fencing as the two routes above — the connection trust check, then
+   * a 405 for anything but POST. The refusal kinds are a poor man's status map:
+   * `not-found` is a 404 (a key the account does not carry), `ambiguous`,
+   * `no-limit` and `invalid` are 400s (the browser asked for something that is
+   * not a raise), and anything the PATCH itself said is a 502 — the words are
+   * upstream's, and this half must not invent its own for a reply it never
+   * saw.
+   *
+   * A completed raise does not just answer `current()`: it bumps `raisedAtMs`
+   * and retires the cache, because the browser's first poll after this reply
+   * will carry `?attempted=<the epoch this read ran at>`, and that poll must
+   * read upstream rather than be handed the reply this route already retired.
+   */
+  ctx.effect(() => ctx.webServer.register({
+    kind: 'exact',
+    path: KEY_LIMIT_PATH,
+    handler: async (req, res) => {
+      const rejection = ctx.connection.requestRejection(req)
+      if (rejection !== undefined) {
+        res.statusCode = rejection
+        res.end()
+        return
+      }
+      if (req.method !== 'POST') {
+        res.statusCode = 405
+        res.setHeader('allow', 'POST')
+        res.end()
+        return
+      }
+      let parsed
+      try {
+        parsed = parseKeyLimitBody(await readBoundedBody(req))
+      } catch {
+        sendJson(res, 400, { status: 'error', error: 'expected {"name": "...", "limit": ...}' })
+        return
+      }
+      if (parsed === undefined) {
+        sendJson(res, 400, { status: 'error', error: 'expected {"name": "...", "limit": ...}' })
+        return
+      }
+      const resolved = await ctx.credentials.resolve(config.credentialRef)
+      if (resolved === undefined) {
+        sendJson(res, 409, { status: 'error', error: 'no management key is configured' })
+        return
+      }
+      try {
+        const raised = await raiseKeyLimit(
+          config, resolved.value, parsed.name, parsed.limit,
+          AbortSignal.timeout(config.timeoutMs),
+        )
+        // The reply that follows this raise must read upstream: a cached
+        // pre-raise `limits` would show the old cap beside the raise's own
+        // confirmation, and the confirmation is the one number the reader just
+        // acted on.
+        cached = undefined
+        generation += 1
+        failures = 0
+        lastAttemptMs = 0
+        ctx.logger.info?.('openrouter-spend: raised a key limit', raised)
+        sendJson(res, 200, { status: 'ok', ...raised })
+      } catch (error) {
+        const reason = error instanceof Error ? error.message : String(error)
+        ctx.logger.warn('openrouter-spend: raising a key limit failed', reason)
+        const status = error?.kind === 'not-found' ? 404
+          : error?.kind !== undefined ? 400
+          : 502
+        sendJson(res, status, { status: 'error', error: reason })
+      }
+    },
+  }), `openrouter-spend: POST ${KEY_LIMIT_PATH}`)
 
   // Prime the cache so the first browser poll is a reply rather than a stall.
   ctx.effect(() => {
